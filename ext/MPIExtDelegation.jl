@@ -337,7 +337,9 @@ end
 
 function lend_start_job!(st::LendState, home::Int, uid::UInt64, payload::Vector{UInt8})
     t = Task(() -> lend_job(st, home, uid, payload))
-    t.sticky = false
+    # N.B. `sticky = false` alone is not enough: a Task made by a task that is bound to a thread
+    # (the one that calls `enable_delegation!`, the service) starts on that thread too
+    Dagger.set_task_migratable!(t)
     Dagger.clear_task_scope!(t)
     schedule(t)
     Dagger.Sch.errormonitor_tracked("mpi_lend_job", t)
@@ -445,7 +447,9 @@ function Dagger.enable_delegation!(accel::MPIAcceleration; slots::Integer=max(Th
     end
     LEND_ENABLED[] = true
     t = Task(() -> lend_service_loop(st))
-    t.sticky = false
+    # N.B. `sticky = false` alone is not enough: a Task made by a task that is bound to a thread
+    # (the one that calls `enable_delegation!`, the service) starts on that thread too
+    Dagger.set_task_migratable!(t)
     Dagger.clear_task_scope!(t)
     schedule(t)
     Dagger.Sch.errormonitor_tracked("mpi_lend_service", t)
