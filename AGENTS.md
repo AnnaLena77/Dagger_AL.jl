@@ -1088,3 +1088,27 @@ lesson.
    `git reset -- LLM_info`). Stage only the source files you mean (`git add src
    test`), check `git show --stat` before leaving the branch, and never publish
    or sync a revision with `git archive` of such a commit.
+
+98. **`Task` + `sticky = false` still starts on the creator's thread when the
+   creator is bound to one; use `Dagger.set_task_migratable!`.** The lend
+   service was created by the main task (thread 1) and every job it made
+   inherited thread 1, so a thief with 16 idle threads ran its jobs one after
+   the other, 150-480 ms late, behind the driver's planning: lending made a
+   4 x 16 run *slower* (2.2-2.8 s against 2.0 s) and the symptom looked like
+   protocol latency. A trace (`MPIExt.LEND_TRACE_ON[] = true`) showed jobs
+   started in one millisecond and finished one task duration apart. In
+   isolation: 15 busy tasks from `Task`+`schedule` on the main task used 1
+   thread (1.5 s), the same from a spawned task or `Threads.@spawn` 15
+   (0.1 s). Fixed running service with `set_task_migratable!`; the broadcast
+   relay (`start_bcast_relay!`) is made the same way and is bound to the thread
+   of whoever called `accelerate!` (not changed here).
+
+99. **A request/grant protocol must ask per free slot, not per peer.** The
+   thief registered `want = free` at a peer once and waited for the answer
+   before asking again, so 15 slots that finished together shared one new
+   request per round trip. Keep the demand registered at each peer equal to
+   the free slots (requests carry a delta), and have the victim add it.
+   Also: the first lend of a process compiles grant, job and result paths
+   while 15 tasks wait (first round 2.3-2.6x ideal, warm rounds 1.2x);
+   `enable_delegation!` lends one task to itself to warm them. Always report
+   the first round separately from the warm ones.
