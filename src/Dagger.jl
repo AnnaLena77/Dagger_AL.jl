@@ -190,6 +190,7 @@ function __init__()
     # environment would be baked into the compiled image
     ELIDE_FOREIGN_TASKS[] = get(ENV, "JULIA_DAGGER_ELIDE_FOREIGN_TASKS", "0") in ("1", "true")
     FREE_MPI_THREADS[] = get(ENV, "JULIA_DAGGER_FREE_MPI_THREADS", "0") in ("1", "true")
+    Sch.TWO_CHOICES_MIN[] = parse(Int, get(ENV, "JULIA_DAGGER_TWO_CHOICES_MIN", "8"))
 
     @static if !isdefined(Base, :get_extension)
         @require Distributions="31c24e10-a181-5473-b8eb-7969acd0382f" begin
