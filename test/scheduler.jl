@@ -754,6 +754,24 @@ end
         end
     end
 
+    # Many tasks finishing at once: every result must be stored and every
+    # dependent released exactly once while the finishers contend for
+    # `state.lock` (cost-model updates now run after unlocking it).
+    @testset "concurrent completions" begin
+        layers = 6
+        width = 64
+        prev = [Dagger.spawn(identity, i) for i in 1:width]
+        for _ in 2:layers
+            prev = [Dagger.spawn(+, prev[i], prev[mod1(i + 1, width)]) for i in 1:width]
+        end
+        vals = fetch.(prev)
+        ref = collect(1:width)
+        for _ in 2:layers
+            ref = [ref[i] + ref[mod1(i + 1, width)] for i in 1:width]
+        end
+        @test vals == ref
+    end
+
     # Batch-mode (compute_dag) termination edge case: the final task of a
     # batch DAG finishes in-process via the local fast-path, driving
     # running_count to 0 on a worker thread while scheduler_run blocks on
