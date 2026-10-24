@@ -233,7 +233,8 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
         # collected here and scheduled *after* releasing state.lock, so that
         # schedule_one! never runs under the submission lock.
         ready = Sch.Thunk[]
-        @lock state.lock begin
+        Dagger.lock_brief!(state.lock)
+        try
             # Attach `thunk` within the scheduler
             # N.B. Explicit lock/unlock (see above) to avoid a closure capturing
             # `thunk`; the critical section is unchanged.
@@ -306,6 +307,8 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
             # N.B. No RescheduleSignal: scheduling is driven inline by
             # schedule_ready! below and by completion handlers, so there is
             # no central schedule! pass to wake.
+        finally
+            unlock(state.lock)
         end
         # Place any immediately-ready thunk(s) with state.lock released.
         Sch.schedule_ready!(state, ready)

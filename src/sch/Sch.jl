@@ -557,7 +557,7 @@ handled by `scheduler_run`.
 """
 function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, metadata)
     ready = Thunk[]
-    proceed = lock(state.lock) do
+    proceed = Dagger.lock_brief(state.lock) do
         thunk_failed = false
         if res isa Exception
             # A non-fault task error. In allow-errors mode we propagate it to the
@@ -936,7 +936,7 @@ concurrently across threads.
     # assigned to captured outer locals, which would Core.Box them.
     ctx = state.ctx
 
-    p1_resolved, procs_filt = lock(state.lock) do
+    p1_resolved, procs_filt = Dagger.lock_brief(state.lock) do
         safepoint(state)
 
         # Remove processors that aren't yet initialized
@@ -1111,7 +1111,7 @@ concurrently across threads.
     # N.B. Explicit lock/try/finally rather than a `do`-closure: the closure
     # captured `scheduled`/`best_loc`/`best_spec` (all assigned in the loop
     # above), which forced a Core.Box for each per call.
-    lock(state.lock)
+    Dagger.lock_brief!(state.lock)
     try
         if scheduled
             fire_tasks!(ctx, best_loc, [best_spec], state, restore_ready)
