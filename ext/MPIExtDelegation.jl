@@ -166,6 +166,18 @@ end
 # ---------------------------------------------------------------------------------------
 # Protocol
 
+# Diagnostics (off by default): a time-stamped event list for finding where lending time goes.
+# `LEND_TRACE_ON[] = true`, then read `LEND_TRACE` (time in seconds, kind, two integers).
+const LEND_TRACE_ON = Ref(false)
+const LEND_TRACE = Tuple{Float64,Symbol,Int,Int}[]
+const LEND_TRACE_LOCK = ReentrantLock()
+function lend_trace(kind::Symbol, a::Integer=0, b::Integer=0)
+    LEND_TRACE_ON[] || return nothing
+    t = time()
+    @lock LEND_TRACE_LOCK push!(LEND_TRACE, (t, kind, Int(a), Int(b)))
+    return nothing
+end
+
 const LEND_TAG = 1
 const LEND_REQ = UInt8(1)      # (REQ, thief, want)       idle rank asks for up to `want` tasks
 const LEND_GRANT = UInt8(2)    # (GRANT, uid, home, bytes)   victim -> thief: run (f, args, kwargs)
@@ -253,6 +265,7 @@ function lend_serve_waiters!(st::LendState)
             continue
         end
         want > 1 && lend_add_waiter!(st, thief, want - 1; replace=false, last=true)
+        lend_trace(:grant_send, thief, length(st.pool.queue))
         lend_send!(st, thief, (LEND_GRANT, rec.uid, me, payload))
         did = true
     end
@@ -286,6 +299,7 @@ function lend_issue_requests!(st::LendState)
         st.owed[peer+1] == 0 || continue
         want = pool.free
         want > 0 || break
+        lend_trace(:req_send, peer, want)
         lend_send!(st, peer, (LEND_REQ, me, want))
         st.owed[peer+1] = want
         did = true
@@ -308,6 +322,7 @@ function lend_job(st::LendState, home::Int, uid::UInt64, payload::Vector{UInt8})
         end
         (LEND_FAIL, uid, lend_encode(wire))
     end
+    lend_trace(:job_done, home, uid)
     try
         lend_send!(st, home, msg)
     finally
@@ -327,6 +342,7 @@ end
 
 function lend_handle!(st::LendState, src::Int, msg)
     kind = msg[1]::UInt8
+    lend_trace(:msg, src, kind)
     if kind == LEND_REQ
         _, thief, want = msg
         lend_add_waiter!(st, Int(thief), Int(want); replace=true, last=true)
@@ -335,6 +351,7 @@ function lend_handle!(st::LendState, src::Int, msg)
         st.owed[src+1] = max(st.owed[src+1] - 1, 0)
         if lend_pool_try_take!(st.pool)
             Threads.atomic_add!(st.n_stolen, 1)
+            lend_trace(:job_start, src, uid)
             lend_start_job!(st, Int(home), uid, payload)
         else
             # no room any more: give it back, and drop the request that sent it
@@ -502,6 +519,7 @@ function mpi_lend_run(st::LendState, proc::MPIProcessor, f, raw_args::Tuple, kwa
         rec = LendRecord(lend_pool_new_uid!(pool), f, raw_args, kwargs)
         if !lend_pool_enter!(pool, rec)
             # queued: an idle rank may be waiting for exactly this
+            lend_trace(:queued, rec.uid, length(pool.queue))
             lend_serve_waiters!(st)
             wait(rec.event)
             if rec.state == LEND_DONE
@@ -518,6 +536,7 @@ function mpi_lend_run(st::LendState, proc::MPIProcessor, f, raw_args::Tuple, kwa
         end
     end
     Threads.atomic_add!(st.n_local, 1)
+    lend_trace(:local_start, rec.uid)
     try
         return mpi_execute_inner(proc, f, raw_args...; kwargs...)
     finally
