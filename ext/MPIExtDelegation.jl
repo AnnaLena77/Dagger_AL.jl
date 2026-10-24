@@ -14,8 +14,8 @@
 #  * `LendState` + service task: one per rank, on a duplicated communicator that only carries lending
 #    traffic (it cannot shift world tags or uniform ids). All sends are non-blocking and are progressed
 #    by the service task, so it never waits for a peer that may itself be waiting for it. An idle
-#    rank (free slots, nothing queued) asks every other rank for work (`REQ`); a rank without surplus
-#    remembers the request (lifeline) and answers when a lendable task is queued later.
+#    rank (free slots) keeps a request for as many tasks as it has free slots registered at every other
+#    rank (`REQ`); a rank without surplus remembers it (lifeline) and answers when a lendable task is queued.
 #  * `mpi_lend_run`: the owner side, called in place of `mpi_execute_inner`.
 
 const LEND_QUEUED = 0
@@ -179,7 +179,7 @@ function lend_trace(kind::Symbol, a::Integer=0, b::Integer=0)
 end
 
 const LEND_TAG = 1
-const LEND_REQ = UInt8(1)      # (REQ, thief, want)       idle rank asks for up to `want` tasks
+const LEND_REQ = UInt8(1)      # (REQ, thief, delta)      a rank with free slots asks for `delta` more tasks
 const LEND_GRANT = UInt8(2)    # (GRANT, uid, home, bytes)   victim -> thief: run (f, args, kwargs)
 const LEND_RETURN = UInt8(3)   # (RETURN, uid)            thief -> victim: no room, run it yourself
 const LEND_RESULT = UInt8(4)   # (RESULT, uid, bytes)
@@ -253,7 +253,7 @@ function lend_serve_waiters!(st::LendState)
         end
         rec = lend_pool_steal!(st.pool, thief)
         if rec === nothing
-            lend_add_waiter!(st, thief, want; replace=false)
+            lend_add_waiter!(st, thief, want)
             return did
         end
         payload = try
@@ -261,22 +261,23 @@ function lend_serve_waiters!(st::LendState)
         catch
             # not serializable: it has to run here
             lend_pool_requeue!(st.pool, rec.uid; nolend=true)
-            lend_add_waiter!(st, thief, want; replace=false)
+            lend_add_waiter!(st, thief, want)
             continue
         end
-        want > 1 && lend_add_waiter!(st, thief, want - 1; replace=false, last=true)
+        want > 1 && lend_add_waiter!(st, thief, want - 1; last=true)
         lend_trace(:grant_send, thief, length(st.pool.queue))
         lend_send!(st, thief, (LEND_GRANT, rec.uid, me, payload))
         did = true
     end
 end
 
-# `replace`: a new request supersedes what that thief had registered; otherwise a newer entry wins
-function lend_add_waiter!(st::LendState, thief::Int, want::Int; replace::Bool, last::Bool=false)
+# Add to what the thief has registered (`last`: at the back of the round robin, else at the front). A waiter
+# put back after a failed steal merges with whatever a newer request added meanwhile.
+function lend_add_waiter!(st::LendState, thief::Int, want::Int; last::Bool=false)
     @lock st.wlock begin
         idx = findfirst(w -> w[1] == thief, st.waiters)
         if idx !== nothing
-            replace && (st.waiters[idx] = (thief, want))
+            st.waiters[idx] = (thief, st.waiters[idx][2] + want)
         elseif last
             push!(st.waiters, (thief, want))
         else
@@ -286,22 +287,25 @@ function lend_add_waiter!(st::LendState, thief::Int, want::Int; replace::Bool, l
     return
 end
 
-# Thief: an idle rank asks every peer that owes it nothing
+# Thief: keep every peer's registered demand at the number of free slots. `owed[peer]` is what that peer
+# still owes us, so a slot that frees up asks for one more at once and does not wait for an earlier
+# request to be answered (measured: one outstanding request per peer capped a 4 x 16 run at about 50
+# lent tasks per second, 80-110 of 512).
 function lend_issue_requests!(st::LendState)
     pool = st.pool
-    pool.free > 0 || return false
+    free = pool.free
+    free > 0 || return false
     sz = MPI.Comm_size(st.comm)
     sz == 1 && return false
     me = MPI.Comm_rank(st.comm)
     did = false
     for k in 1:(sz-1)
         peer = mod(me + k, sz)
-        st.owed[peer+1] == 0 || continue
-        want = pool.free
-        want > 0 || break
-        lend_trace(:req_send, peer, want)
-        lend_send!(st, peer, (LEND_REQ, me, want))
-        st.owed[peer+1] = want
+        delta = free - st.owed[peer+1]
+        delta > 0 || continue
+        lend_trace(:req_send, peer, delta)
+        lend_send!(st, peer, (LEND_REQ, me, delta))
+        st.owed[peer+1] += delta
         did = true
     end
     return did
@@ -345,7 +349,7 @@ function lend_handle!(st::LendState, src::Int, msg)
     lend_trace(:msg, src, kind)
     if kind == LEND_REQ
         _, thief, want = msg
-        lend_add_waiter!(st, Int(thief), Int(want); replace=true, last=true)
+        lend_add_waiter!(st, Int(thief), Int(want); last=true)
     elseif kind == LEND_GRANT
         _, uid, home, payload = msg
         st.owed[src+1] = max(st.owed[src+1] - 1, 0)
