@@ -446,6 +446,36 @@ elision_stats(::Acceleration) = nothing
 reset_elision_stats!() = reset_elision_stats!(current_acceleration())
 reset_elision_stats!(::Acceleration) = nothing
 
+"""
+    enable_delegation!(; slots=max(Threads.nthreads(:default) - 1, 1))
+
+(MPI) Let tasks spawned with `lend=true` have their execution lent to idle ranks. Collective: every
+rank must call it at the same point, before the first lendable task (it creates a communicator for
+the lending traffic). `slots` is the number of lendable tasks a rank runs at once; further lendable
+tasks wait in a queue from which an idle rank may take them. The default leaves one thread of the rank
+free: the lending service, the broadcast relay and the thread that plans tasks need one, and a rank
+whose threads all run kernels that never yield cannot answer a request until one finishes. Nothing changes for tasks that do not
+set `lend=true`. Other accelerations do not support it.
+"""
+enable_delegation!(; kwargs...) = enable_delegation!(current_acceleration(); kwargs...)
+enable_delegation!(::Acceleration; kwargs...) = error("task delegation is only supported by the MPI acceleration")
+
+"Undo [`enable_delegation!`](@ref) (collective as well)."
+disable_delegation!() = disable_delegation!(current_acceleration())
+disable_delegation!(::Acceleration) = nothing
+
+"""
+    delegation_stats() -> NamedTuple or nothing
+
+Counters of this process for [`enable_delegation!`](@ref): `lent` (tasks of this rank whose execution
+was lent out and whose answer has arrived), `failed` (of those, the ones that came back as a failure),
+`returned` (claims a thief handed back unrun), `stolen` (tasks of other ranks run here), `local_`
+(lendable tasks run on their own rank).
+`nothing` when delegation is not enabled.
+"""
+delegation_stats() = delegation_stats(current_acceleration())
+delegation_stats(::Acceleration) = nothing
+
 default_processor(space::CPURAMMemorySpace) = OSProc(space.owner)
 default_memory_space(accel::DistributedAcceleration) = CPURAMMemorySpace(myid())
 # Chunk records must be labeled with the space the value actually resides in
