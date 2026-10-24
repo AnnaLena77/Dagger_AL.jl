@@ -1053,3 +1053,29 @@ lesson.
    owner 196-260 -> 154 us per rank-scoped task. Also: a plain unscoped task is
    not cheaper to plan than a rank-scoped one (`mpi_preplace!` makes it one), and
    two equal immutable scopes are `===`, so a test cannot tell them apart by identity.
+
+95. **Check that the A/B baseline has the same defaults, not only the same commits.**
+   A 4-thread MPI A/B showed my branch 20 % slower than the cluster's `int4`
+   (154-162 vs 128-135 us per plain `@spawn`), and four more jobs went into
+   bisecting my own commits before a build of the actual parent commit measured
+   the same 154-161 us. `int4` was the integration branch *plus* the
+   free-threads-default branch: it differed from my parent in one default that
+   removes a thread hand-over under MPI. Export the exact parent commit as the
+   baseline first, and compare a candidate against `git merge-base` before
+   suspecting the candidate. Also: `proc_states(uid)` is a read-locked dict
+   lookup, so keep per-scheduler handles that the hot path needs (the queued-task
+   counter) as fields of the per-processor state.
+
+96. **Plain `@spawn` cost is the submitter's latency, so measure submit and drain
+   separately before optimizing anything.** `eager_submit_internal!` schedules
+   inline (`schedule_ready!` runs `schedule_one!` on the caller), and execution
+   overlaps with it. Timing the submit loop and the wait for the last result
+   separately (`bench/spawn_split.jl`) gave ~100-225 us per task for submission
+   and ~2.5 us for the drain; a plain `Threads.@spawn` is 3-15 us. Phase timers
+   on a throw-away branch (`bench/spawn_phase_timers.jl`) then split a 4-thread
+   Fulda task of ~108 us into `estimate_task_costs!` ~21-28, `fire_tasks!`
+   ~24 (of which launching the pooled task 8-9), options+defaults ~11, select +
+   reserve ~11, edge wiring ~12, thunk+DRef ~6. Only the estimate grows with the
+   thread count (50 us at 64). The Opterons are ~7x slower per primitive than a
+   laptop, where the same task is 28 us, so locate costs on the cluster. A sampling
+   profile of the same loop is mostly idle `psynch_cvwait` samples and says nothing.
