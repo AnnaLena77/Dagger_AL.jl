@@ -455,6 +455,34 @@ function Dagger.enable_delegation!(accel::MPIAcceleration; slots::Integer=max(Th
     Dagger.Sch.errormonitor_tracked("mpi_lend_service", t)
     st.relay = t
     atexit(() -> lend_stop!(accel.comm))
+    lend_warmup!(st)
+    return nothing
+end
+
+# Lend one trivial task to ourselves through the real path (grant, job, result), so that the first real
+# lend does not compile it: measured at 4 ranks x 16 threads, the first round of a process took 2.3-2.6x
+# the ideal and the warm rounds 1.2x. Self-addressed, hence not collective. The counters are reset after.
+function lend_warmup!(st::LendState)
+    me = MPI.Comm_rank(st.comm)
+    rec = LendRecord(lend_pool_new_uid!(st.pool), identity, (1,), (;))
+    @lock st.pool.lock push!(st.pool.queue, rec)
+    # N.B. Not through the waiters: another rank's request may already be registered and would get the record
+    claimed = lend_pool_steal!(st.pool, me)
+    claimed === rec || error("lend warm-up: claimed the wrong record")
+    lend_send!(st, me, (LEND_GRANT, rec.uid, me, lend_encode((rec.f, rec.args, rec.kwargs))))
+    lend_serve_waiters!(st)      # compile only (nobody has to be waiting)
+    deadline = time() + 30
+    while rec.state != LEND_DONE && time() < deadline
+        sleep(0.001)
+    end
+    if rec.state != LEND_DONE
+        @warn "MPI delegation: the self-addressed warm-up task did not come back"
+        lend_pool_requeue!(st.pool, rec.uid; nolend=true)
+        @lock st.pool.lock filter!(r -> r !== rec, st.pool.queue)
+    end
+    for c in (st.n_lent, st.n_failed, st.n_returned, st.n_stolen, st.n_local)
+        c[] = 0
+    end
     return nothing
 end
 
