@@ -24,7 +24,7 @@
 
 ## Tests
 
-Targeted MPI subset (spawn, elision, free threads, Datadeps thread placement, struct transport, rank-local graphs) with free threads and elision off and on; full MPI suite on Fulda. Probe: `LLM_info/bench/task_overhead.jl`, allocation profile `chol_profile.jl` (not in git).
+Targeted MPI subset (spawn, elision, free threads, Datadeps thread placement, struct transport, rank-local graphs) locally with the switches off (the local loop meant to switch them on did not, see lesson 101); full MPI suite on Fulda with free threads off and on, and with free threads + elision (0 failures each). Probe: `LLM_info/bench/task_overhead.jl`, allocation profile `chol_profile.jl` (not in git).
 
 ## Main files
 
