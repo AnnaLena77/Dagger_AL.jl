@@ -1079,3 +1079,12 @@ lesson.
    thread count (50 us at 64). The Opterons are ~7x slower per primitive than a
    laptop, where the same task is 28 us, so locate costs on the cluster. A sampling
    profile of the same loop is mostly idle `psynch_cvwait` samples and says nothing.
+
+97. **Never `git add -f` a directory that is ignored on purpose.** `LLM_info/` is
+   excluded through `.git/info/exclude`; force-adding it for a throw-away
+   instrumentation commit made it *tracked* on that branch, so the next
+   `git checkout` of the working branch deleted all 985 files from disk (the
+   copies in the commit saved them: `git checkout <tmp-branch> -- LLM_info` then
+   `git reset -- LLM_info`). Stage only the source files you mean (`git add src
+   test`), check `git show --stat` before leaving the branch, and never publish
+   or sync a revision with `git archive` of such a commit.
