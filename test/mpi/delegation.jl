@@ -190,16 +190,21 @@ deleg_total(v) = MPI.Allreduce(v, +, comm)
     @testset "mixed pinned and free tasks" begin
         cpus = filter(p -> p.innerProc isa Dagger.ThreadProc, mpi_procs())
         target = last(cpus)
+        MPI.Barrier(comm)
+        before = deleg_counters()
         pinned = [Dagger.@spawn(scope=Dagger.ExactScope(target), lend=true, deleg_where(i)) for i in 1:8]
-        free = [Dagger.@spawn lend=true deleg_busy(i, 0.03) for i in 1:16]
         plain = [Dagger.@spawn deleg_plain(i) for i in 1:16]
         for (i, t) in enumerate(pinned)
             r = fetch(t)
             # a task that names its processor is never lent
             @test r == (target.rank, target.innerProc.tid, i)
         end
-        @test first.(fetch.(free)) == [i * i for i in 1:16]
         @test fetch.(plain) == [i + 1 for i in 1:16]
+        MPI.Barrier(comm)
+        # neither pinned nor plain tasks pass through the pool: enabling delegation changes nothing for them
+        @test deleg_counters() == before
+        free = [Dagger.@spawn lend=true deleg_busy(i, 0.03) for i in 1:16]
+        @test first.(fetch.(free)) == [i * i for i in 1:16]
     end
 
     @testset "shutdown with an open request" begin
