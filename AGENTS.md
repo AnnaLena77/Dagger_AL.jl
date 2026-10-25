@@ -1231,3 +1231,17 @@ lesson.
    "quiet" benchmark rounds. Reaping scripts must act only on the processes
    they just signalled: the first `stray_reap.sh` also SIGKILLed young
    processes of live jobs.
+
+109. **Re-measure a "known" bottleneck on the current head before building on
+   it, and check what a probe's timed section contains.** Lesson 107 put ~0.7 s
+   of a 2-rank Cholesky into ~500 blocking aliasing exchanges. After the copy fix
+   and streaming landed, the same `HIER_TIMING` run showed the whole `aliasing()`
+   call at 29 ms of 1.95 s, and batching them (`schedule_slot_window!`) moved
+   2 x 32 by nothing (it only helped 4 x 16, by 10-14 %). A phase probe that
+   timed `copyto!(DA, A)` inside the measured block mixed its remote-slot-heavy
+   regions into the Cholesky numbers and made the batch look like a 3x gain in
+   the copy-to loop: read the per-region `HIER_TIMING` lines, or put only the
+   measured operation between the barrier+`GC.gc()` and the timer. Placing a
+   task ahead of the tasks before it is sound only for a scheduler that never
+   reads planning state (`datadeps_schedule_is_stateless`).
+
