@@ -276,6 +276,15 @@ unbuffered behaviour serializes execution across ranks.
 """
 const DATADEPS_UNIFORM_DEFER = Ref(true)
 
+"""
+Largest region (in tasks) whose submission uniform planning still withholds until
+it is fully planned (see `schedule_partitions_sequential!`); a larger region is
+streamed through the asynchronous submitter, which overlaps planning with
+execution. `JULIA_DAGGER_UNIFORM_DEFER_MAX` sets it at startup (0 streams every
+region, a huge value defers every region).
+"""
+const DATADEPS_UNIFORM_DEFER_MAX = Ref(2048)
+
 ### Planning instrumentation ###
 #
 # Where a region's planning time went, per phase, printed once per region when
@@ -1510,7 +1519,17 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
     # Withholding submission until planning is done keeps every rank computing
     # nothing while it plans, so the rendezvous chain runs at metadata speed and
     # the tasks then execute concurrently across ranks.
-    submit_queue = if uniform_execution() && DATADEPS_UNIFORM_DEFER[]
+    #
+    # That is the right trade for a region of up to `DATADEPS_UNIFORM_DEFER_MAX`
+    # tasks, whose planning is short. For a larger one planning and execution run
+    # back to back instead of overlapping: a 5984-task Cholesky (8192^2, 256^2
+    # tiles) on one rank started its first task 0.97 s in and finished at 1.84 s;
+    # streaming the tasks through the asynchronous submitter finishes at 1.58 s
+    # (2 ranks 2.68 -> 2.18 s, 4 ranks 3.25 -> 2.65 s). Planning then competes
+    # with the running tasks for threads, so the rendezvous are slower, but the
+    # overlap is worth more than that.
+    submit_queue = if uniform_execution() && DATADEPS_UNIFORM_DEFER[] &&
+                      length(seen_tasks) <= DATADEPS_UNIFORM_DEFER_MAX[]
         BatchedEnqueueQueue(wait_all_queue, queue_lock; limit=typemax(Int))
     else
         # Non-uniform (Distributed) still wants its tasks running while the rest
