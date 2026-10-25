@@ -40,7 +40,7 @@ end
 # while holding it for 20-30 us, so most of the wait was the hand-over. Spinning for about as long
 # as a section lasts avoids the park for most waiters. Never unbounded (the holder may be
 # descheduled), and never used where a finalizer may run (see `@safe_lock_spin1`). `spins` is
-# `SCHED_LOCK_SPINS` (`JULIA_DAGGER_SCHED_LOCK_SPINS`, 0 = plain `lock`).
+# `SCHED_LOCK_SPINS` (`JULIA_DAGGER_SCHED_LOCK_SPINS`, 0 = plain `lock`; default 2000).
 const SCHED_LOCK_SPINS = Ref{Int}(0)   # set from the environment in `__init__`
 @inline function lock_brief!(l::ReentrantLock)
     for _ in 1:SCHED_LOCK_SPINS[]

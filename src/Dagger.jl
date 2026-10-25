@@ -191,7 +191,7 @@ function __init__()
     ELIDE_FOREIGN_TASKS[] = get(ENV, "JULIA_DAGGER_ELIDE_FOREIGN_TASKS", "0") in ("1", "true")
     FREE_MPI_THREADS[] = get(ENV, "JULIA_DAGGER_FREE_MPI_THREADS", "0") in ("1", "true")
     Sch.TWO_CHOICES_MIN[] = parse(Int, get(ENV, "JULIA_DAGGER_TWO_CHOICES_MIN", "8"))
-    SCHED_LOCK_SPINS[] = parse(Int, get(ENV, "JULIA_DAGGER_SCHED_LOCK_SPINS", "0"))
+    SCHED_LOCK_SPINS[] = parse(Int, get(ENV, "JULIA_DAGGER_SCHED_LOCK_SPINS", "2000"))
 
     @static if !isdefined(Base, :get_extension)
         @require Distributions="31c24e10-a181-5473-b8eb-7969acd0382f" begin
