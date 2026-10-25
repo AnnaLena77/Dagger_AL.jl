@@ -1112,3 +1112,12 @@ lesson.
    while 15 tasks wait (first round 2.3-2.6x ideal, warm rounds 1.2x);
    `enable_delegation!` lends one task to itself to warm them. Always report
    the first round separately from the warm ones.
+
+100. **Measure a contended-lock change on the workload that contends, not on
+   the micro-benchmark.** Spinning 2000 times before parking on `state.lock`
+   (`lock_brief!`) is invisible in plain `@spawn` (79-88 us at 16 threads,
+   within noise) and worth 7-9 % on a 16-thread Datadeps Cholesky (1.62-1.68 ->
+   1.51-1.53 s), because there the completion threads and the submitter collide
+   on the lock. Judging it on the spawn loop alone would have kept it off, as
+   the first 300-spin trial did. Compare interleaved, alternating revisions in
+   one allocation (lessons 91, 95), and take both numbers before deciding.
