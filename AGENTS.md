@@ -1200,3 +1200,17 @@ lesson.
    per-rank planning of every task (sched phase 1.0 s against 0.56 s on one
    rank), not transfers or the broadcast relay (mean 80 us per message, ~10 %
    busy).
+
+108. **A "fixed" or "equal" claim names the size and configuration, and orphaned
+   processes contaminate timings.** The MPI Cholesky result "same as shared
+   memory" held at 4096^2 (816 tasks) and failed at 8192^2
+   with two ranks (1.84 s on 1 x 64, 5.7 s on 2 x 32): the effect needs enough
+   transfers to show, and nobody had measured several ranks at the larger size.
+   Cite the problem size, rank x thread layout and baseline with every such
+   statement. Check it against the raw log, not a summary grep: two failing-test
+   lines were missed this way. Before timing, and after every `scancel`, look for
+   orphaned test processes (`LLM_info/bench/stray_check.sh`): leftovers up to
+   1 day 22 hours old, one at 75 % CPU, were found on four nodes after the
+   "quiet" benchmark rounds. Reaping scripts must act only on the processes
+   they just signalled: the first `stray_reap.sh` also SIGKILLed young
+   processes of live jobs.
