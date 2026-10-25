@@ -180,7 +180,8 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
                 third = (o + 2) % nranks
                 t = Dagger.@spawn scope=Dagger.scope(mpi_rank=other) elide_blocksum(blocks[1])
                 wait(t)
-                @test (t.stub !== nothing) == (rank == third)
+                # every rank that is neither the block's nor the task's elides, not only `third` (4+ ranks)
+                @test (t.stub !== nothing) == (rank != o && rank != other)
                 @test fetch(t) == 0.0
                 @test allequal(MPI.Allgather(Int(t.uid), comm))
             end
