@@ -1177,3 +1177,26 @@ lesson.
    merge options + defaults cost 10.1 us (16 threads) / 17.5 us (64) against 2 us
    for plain `@spawn`. Phase timers that split a phase in two (signature vs merge)
    found it in one run.
+
+106. **Count the transfers before blaming the transport.** A 2-rank MPI Cholesky
+   (8192^2, 256^2 tiles) was 3x slower than one rank, and the obvious suspects
+   (relay, receive polling, 0.7 GB/s fresh-array receives) were all innocent:
+   the run issued 5458 tile transfers where the 528 panel tiles need one each.
+   `add_writer!(...; copied=true)` clears the history and records the copy as
+   the only entry (and the owner), so `compute_remainder_for_arg!` saw a
+   replica made by a copy as "owned by the destination" and copied the same
+   unchanged tile back, and forward again, every time the *other* space read it
+   (a tile read alternately from two ranks was copied on every read). The
+   currency set `arg_current` already knew better; the planner only used it for
+   the final write-back. Consult it first, but only for an argument that no
+   other argument overlaps (a write through a view reaches `arg_current` only
+   via the overlap bookkeeping), and only for entries that were recorded (a
+   copy into an argument with no record starts from the origin only if nothing
+   was written elsewhere). Found by counting copies per (argument, source,
+   destination) in a throw-away branch and printing the copy sequence of the
+   most-copied tile; the same count on any transfer-heavy slowdown takes minutes
+   and rules a whole class of causes in or out. After the fix 513 transfers
+   remain, 2 x 32 went 5.8 -> 2.65 s and 4 x 16 5.6 -> 3.2 s; what is left is
+   per-rank planning of every task (sched phase 1.0 s against 0.56 s on one
+   rank), not transfers or the broadcast relay (mean 80 us per message, ~10 %
+   busy).
