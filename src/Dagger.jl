@@ -193,7 +193,7 @@ function __init__()
     Sch.LOCAL_FASTPATH[] = get(ENV, "JULIA_DAGGER_LOCAL_FASTPATH", "1") in ("1", "true")
     Sch.TWO_CHOICES_MIN[] = parse(Int, get(ENV, "JULIA_DAGGER_TWO_CHOICES_MIN", "8"))
     DATADEPS_UNIFORM_DEFER_MAX[] = parse(Int, get(ENV, "JULIA_DAGGER_UNIFORM_DEFER_MAX", "2048"))
-    DATADEPS_SLOT_WINDOW[] = parse(Int, get(ENV, "JULIA_DAGGER_SLOT_WINDOW", "32"))
+    DATADEPS_SLOT_WINDOW[] = parse(Int, get(ENV, "JULIA_DAGGER_SLOT_WINDOW", "128"))
     SCHED_LOCK_SPINS[] = parse(Int, get(ENV, "JULIA_DAGGER_SCHED_LOCK_SPINS", "2000"))
 
     @static if !isdefined(Base, :get_extension)

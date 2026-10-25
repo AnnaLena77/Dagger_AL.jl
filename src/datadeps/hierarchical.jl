@@ -296,7 +296,7 @@ blocking rendezvous (about 500 per 8192^2 / 256^2-tile Cholesky, 0.7 s of the
 planning thread at 2 ranks x 32 threads, where a rendezvous costs 1.4 ms while
 the peers compute).
 """
-const DATADEPS_SLOT_WINDOW = Ref(32)
+const DATADEPS_SLOT_WINDOW = Ref(128)
 
 ### Planning instrumentation ###
 #
