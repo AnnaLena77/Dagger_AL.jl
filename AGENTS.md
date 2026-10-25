@@ -1201,6 +1201,23 @@ lesson.
    rank), not transfers or the broadcast relay (mean 80 us per message, ~10 %
    busy).
 
+107. **Overlapping the plan with the run is worth more than a cheaper plan, and
+   a backlog sampler shows it in one run.** Uniform (MPI) planning withheld every
+   task of a region until it had planned them all, deliberately (ranks stall each
+   other in the planning rendezvous while tasks run). Sampling
+   `Sch.EAGER_STATE[].running_count` every 10 ms in the probe showed the
+   outstanding-task count at 1 until 0.97 s (one rank) or 1.5 s (two ranks) and
+   only then a backlog: planning and execution ran back to back, on one rank
+   too. Streaming a large region (> 2048 tasks, `DATADEPS_UNIFORM_DEFER_MAX`)
+   through the asynchronous submitter took the 8192^2 Cholesky from 1.84 to
+   1.59 s (1 x 64), 2.67 to 2.12 s (2 x 32), 3.25 to 2.75 s (4 x 16). What is
+   left is planning: with the tasks running, the planning thread spends 0.8 of
+   ~1.5 s in `compute_remainder_for_arg!`, 0.7 s of that in ~500 blocking
+   aliasing exchanges for the remote slots (1.4 ms each while the other ranks
+   compute, 0.47 ms when they do not). A batched exchange for all slots a
+   partition needs is the next step; measure per-section planning-thread time
+   (timers around the sections of `distribute_task!`) before touching it.
+
 108. **A "fixed" or "equal" claim names the size and configuration, and orphaned
    processes contaminate timings.** The MPI Cholesky result "same as shared
    memory" held at 4096^2 (816 tasks) and failed at 8192^2
