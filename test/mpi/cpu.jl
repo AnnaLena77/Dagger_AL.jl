@@ -148,6 +148,7 @@ end
 include("spawn.jl")
 include("elide.jl")
 include("free_threads.jl")
+include("delegation.jl")
 include("comm_self.jl")
 include("groups.jl")
 include("allgather.jl")
