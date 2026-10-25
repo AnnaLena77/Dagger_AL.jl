@@ -1121,3 +1121,59 @@ lesson.
    on the lock. Judging it on the spawn loop alone would have kept it off, as
    the first 300-spin trial did. Compare interleaved, alternating revisions in
    one allocation (lessons 91, 95), and take both numbers before deciding.
+
+101. **A scheduler cache keyed by object address pollutes a frequency cache,
+   and the address of an immutable value is not a stable fact.** Keying the
+   compatible-set cache of a Datadeps union scope by address looked like the
+   fix for `objectid` hashing 64 members per task, and it measured better in
+   the first regions: then each region built 64 new scope objects, the
+   frequency-ordered cache (256 entries) filled with entries that never hit
+   again, and the new frequency-1 keys were evicted at once, so every later
+   task missed (98 us per task at 64 threads, flat Datadeps Cholesky). A key
+   must be a function of the *contents* (here: length, first and last member)
+   with `===` as the hit test. Separately: `ccall(:jl_value_ptr, ..., (Any,), x)`
+   returns the address of a temporary, the same one for every call, when the
+   compiler knows `x`'s concrete immutable type (Julia 1.13: three different
+   `S1(...)` values gave one address; mutable structs were fine). Whether it is
+   right depends on inference, so it is not a way to ask "is this the same
+   object" for a struct. `MPIExt.mpi_object_address` uses the same call; it
+   works only while its argument is statically `Any`/abstract.
+
+102. **Equal is not identical when a hit has to compare 64 members.** Datadeps
+   built one `UnionScope` per processor, equal in content, so the scheduler's
+   lookup ended each hit in a member-by-member `===` of 64 scopes (22 us per task
+   at 64 threads on Fulda, 1.3 us on a laptop). One shared object per memory
+   space (`share_equal_scope`) makes the same test a pointer comparison. When a
+   cache hit costs O(n), look at how many distinct-but-equal keys the producer
+   makes.
+
+103. **A local fast path is the compatible set, not a rewrite of the decision.**
+   `local_fast_place!` (src/sch/fastpath.jl) takes the cached compatible set of
+   the task's scope and only then skips the general path's per-candidate work,
+   so it can never place a task where the general path would not: it requires
+   every member to be a `ThreadProc` of this process and a
+   `DistributedAcceleration`, leaves `proclist/single/time_util/alloc_util/
+   occupancy`, compute/result scopes and chunk-scope restrictions to the general
+   path, and asks `iscompatible_func/arg` once (the methods dispatch on the
+   processor type only). Pressure counters are resolved once per scheduler
+   (`FastCounters`) and read without a lock. Anything the path cannot decide
+   returns `nothing` with nothing reserved. `JULIA_DAGGER_LOCAL_FASTPATH=0`
+   turns it off; compare against that, not only against an older revision
+   (commit 406efc4 alone moved the Cholesky 1.60 -> 1.52 s at 64 threads).
+
+104. **Do not run `do_tasks` on the placing thread.** Starting a pooled task per
+   placed task costs the submitter 9-10 us (16 threads) to 21-32 us (64), which
+   looks like the next thing to remove. `JULIA_DAGGER_FIRE_INLINE` (enqueue on
+   the placing thread, tried and dropped) made plain `@spawn` 65 -> 91 us at 16
+   threads, 119 -> 93 us at 64, and the 64-thread Cholesky 1.36 -> 1.58 s:
+   `do_tasks` costs 24-67 us per plain task and 79-134 us per Datadeps task, of
+   which the kick loop is 57-97 us (a union-scoped task is never "all pinned"),
+   and the pooled task does that work off the submitter. Cut the kick loop
+   before moving `do_tasks`.
+
+105. **A one-slot memo thrashes on interleaved signatures.** `populate_defaults!`
+   refilled its per-task memo (up to 24 hashed LFU lookups) whenever the signature
+   changed; a task placing a Cholesky sees potrf/trsm/syrk/gemm interleaved, so
+   merge options + defaults cost 10.1 us (16 threads) / 17.5 us (64) against 2 us
+   for plain `@spawn`. Phase timers that split a phase in two (signature vs merge)
+   found it in one run.
