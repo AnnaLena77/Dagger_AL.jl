@@ -1245,3 +1245,16 @@ lesson.
    task ahead of the tasks before it is sound only for a scheduler that never
    reads planning state (`datadeps_schedule_is_stateless`).
 
+110. **A result filter must not be able to hide the launcher's own failure, and
+   Slurm's `--ntasks-per-node` is Open MPI's slot count.** A benchmark job asked
+   for one task per node and then started two ranks with `mpiexec`; Open MPI
+   refused ("There are not enough slots available"), every run ended in seconds,
+   and the job printed only its own `round=... :` headers, because the output
+   was piped through `grep -E "^CHOLMPI|rror"` and the refusal contains neither.
+   The job looked healthy and finished in two minutes (the same shape as lesson
+   32). Request at least as many tasks per node as the largest rank count you
+   will launch (the threads are set separately with `-t`, and `-c` need only
+   cover them), and have the wrapper print a marker such as `NO RESULT` (plus the
+   last lines of raw output) when the filter matched nothing, so an empty result
+   is a visible failure. Unset `-x VAR` names only warn; export them or drop them.
+
