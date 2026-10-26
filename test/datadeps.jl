@@ -1368,3 +1368,61 @@ end
         end
     end
 end
+
+# `JULIA_DAGGER_FLAT_ASYNC_MIN`: a large flat region is submitted through the async submitter. The
+# results must be those of synchronous submission, tasks that consume an earlier task's result must
+# see it, and a failing task must still fail the region.
+@everywhere async_add_one!(A) = (A .+= 1; nothing)
+@everywhere async_double(x) = 2x
+@everywhere async_boom() = error("boom")
+@everywhere async_copy_sum!(dst, src) = (dst .= src .+ dst; nothing)
+@testset "Async submission of flat regions" begin
+    old = Dagger.DATADEPS_FLAT_ASYNC_MIN[]
+    try
+        for min_tasks in (0, 1, 64)
+            Dagger.DATADEPS_FLAT_ASYNC_MIN[] = min_tasks
+
+            # A long chain of dependent in-place updates and independent ones
+            A = zeros(Int, 4)
+            Bs = [zeros(Int, 4) for _ in 1:8]
+            Dagger.spawn_datadeps() do
+                for i in 1:100
+                    Dagger.@spawn async_add_one!(InOut(A))
+                    Dagger.@spawn async_add_one!(InOut(Bs[mod1(i, 8)]))
+                end
+            end
+            @test all(==(100), A)
+            @test sum(sum, Bs) == 4 * 100
+
+            # Two arrays updated together (readers and writers interleaved)
+            S = ones(Int, 4)
+            D = zeros(Int, 4)
+            Dagger.spawn_datadeps() do
+                for _ in 1:50
+                    Dagger.@spawn async_copy_sum!(InOut(D), In(S))
+                end
+            end
+            @test all(==(50), D)
+
+            # A task that consumes the result of an earlier task of the same region
+            res = Dagger.spawn_datadeps() do
+                ts = Dagger.DTask[]
+                for i in 1:100
+                    push!(ts, Dagger.@spawn async_double(i))
+                end
+                Dagger.@spawn async_double(ts[end])
+            end
+            @test fetch(res) == 400
+
+            # A failing task fails the region
+            @test_throws Exception Dagger.spawn_datadeps() do
+                for _ in 1:70
+                    Dagger.@spawn async_add_one!(InOut(A))
+                end
+                Dagger.@spawn async_boom()
+            end
+        end
+    finally
+        Dagger.DATADEPS_FLAT_ASYNC_MIN[] = old
+    end
+end
