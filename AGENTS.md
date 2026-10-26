@@ -1342,3 +1342,17 @@ lesson.
    extract of a test section is not the suite (mine could not finish in 30 minutes even
    on the baseline); if the baseline fails in your instrument, the instrument is wrong.
 
+116. **Planning and submission are two stages; if one thread runs both, their costs add.**
+   The flat Datadeps planner (every single-owner region, i.e. all shared-memory work)
+   submitted each task itself right after planning it: ~70 us of planning plus ~100 us of
+   scheduler submission on the Fulda Opterons = ~157 us per task, 6,400 tasks/s, while the
+   MPI path, which already handed batches to a submitter task, ran the same 5984
+   near-empty tasks 1.6x faster (0.58 vs 0.95 s) despite doing strictly more work per task.
+   The comparison that exposed it was *tiny kernels*: with 16x16 tiles the kernels vanish
+   and wall time is pure runtime throughput, which real-sized kernels hide behind idle
+   threads. When you route work through an async queue, keep every task producer on the same
+   queue (copy and free tasks go through the *scoped* `task_queue`, so set that scope, do not
+   just wrap the planner's own queue), flush before anything that needs a task to exist (a
+   `fetch` of an unlaunched `DTask` argument), and drain in a `finally`. Real Cholesky
+   8192/256 went 1.07 -> 0.92 s at 32 threads and 1.20 -> 0.93 s at 64.
+
