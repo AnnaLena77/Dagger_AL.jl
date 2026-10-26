@@ -2562,8 +2562,11 @@ end
 # naming exactly that processor, which is what Datadeps and explicit pinning use --
 # is a promise; otherwise the choice is the runtime's and need not be kept.
 
-# `scope` names one processor: its thread was requested
-mpi_thread_requested(opts::Options) = mpi_task_scope(opts) isa Dagger.ExactScope
+# `scope` names one processor: its thread was requested. A Datadeps task (tagged) names its processor
+# because the plan has to say which rank runs it, not because it needs that thread; with
+# `Dagger.free_datadeps_threads!` it runs on any free thread of its rank
+mpi_thread_requested(opts::Options) =
+    mpi_task_scope(opts) isa Dagger.ExactScope && !(Dagger.FREE_DATADEPS_THREADS[] && opts.tag !== nothing)
 
 # The task that runs `execute!` is a pooled, migratable task with its TLS in place, so
 # the function can simply be called: Julia runs it on whichever thread is free

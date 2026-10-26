@@ -582,6 +582,16 @@ const FREE_MPI_THREADS = Ref{Bool}(true) # set from the environment in `__init__
 free_mpi_threads!(on::Bool=true) = (FREE_MPI_THREADS[] = on)
 
 """
+    FREE_DATADEPS_THREADS
+
+Experimental, off by default (`Dagger.free_datadeps_threads!`, or `JULIA_DAGGER_FREE_DATADEPS_THREADS=1` at startup).
+With [`FREE_MPI_THREADS`](@ref) on, a Datadeps task of an MPI rank still stays on the thread the plan named. With this
+switch it runs on any free thread of its rank instead, as it does in shared memory.
+"""
+const FREE_DATADEPS_THREADS = Ref{Bool}(false) # set from the environment in `__init__`
+free_datadeps_threads!(on::Bool=true) = (FREE_DATADEPS_THREADS[] = on)
+
+"""
     elide_task!(accel::Acceleration, spec::DTaskSpec, task::DTask) -> Bool
 
 Give the acceleration the chance to complete `task` without building, scheduling

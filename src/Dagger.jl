@@ -191,6 +191,7 @@ function __init__()
     # environment would be baked into the compiled image
     ELIDE_FOREIGN_TASKS[] = get(ENV, "JULIA_DAGGER_ELIDE_FOREIGN_TASKS", "0") in ("1", "true")
     FREE_MPI_THREADS[] = get(ENV, "JULIA_DAGGER_FREE_MPI_THREADS", "1") in ("1", "true")
+    FREE_DATADEPS_THREADS[] = get(ENV, "JULIA_DAGGER_FREE_DATADEPS_THREADS", "0") in ("1", "true")
     Sch.LOCAL_FASTPATH[] = get(ENV, "JULIA_DAGGER_LOCAL_FASTPATH", "1") in ("1", "true")
     Sch.TWO_CHOICES_MIN[] = parse(Int, get(ENV, "JULIA_DAGGER_TWO_CHOICES_MIN", "8"))
     DATADEPS_UNIFORM_DEFER_MAX[] = parse(Int, get(ENV, "JULIA_DAGGER_UNIFORM_DEFER_MAX", "2048"))
