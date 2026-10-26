@@ -1258,3 +1258,23 @@ lesson.
    last lines of raw output) when the filter matched nothing, so an empty result
    is a visible failure. Unset `-x VAR` names only warn; export them or drop them.
 
+111. **A field typed with an abstract struct makes every property access on it a
+   dynamic dispatch, and a runtime `<:` on a value's type is not a pointer
+   compare.** `DTaskPair.spec::DTaskSpec` has no concrete parameters, so each
+   `pair.spec.options`, `spec.fargs` (a custom `getproperty` with a `where`
+   parameter) and `is_typed(spec)` in the submit path recomputed the spec's type
+   parameters at run time, and `valuetype(arg) <: Thunk|DTask|Chunk` per argument
+   per task went through the type-matching machinery too: ~93 % of the submit
+   path's samples sat in `jl_f__compute_sparams` / `exists_subtype`, invisible in
+   the source because the lines look innocent. Fixes: dispatch once onto the
+   concrete type (`eager_launch!(pair) = _eager_launch!(pair.spec, pair.task)`),
+   read plain fields with `getfield`, and test values with `isa` (a pointer
+   compare for concrete `DTask`/`Thunk`/`ThunkID`). A custom `getproperty` that
+   branches on a type parameter cannot be rewritten as a field read without
+   losing the constant folding the typed path relies on, so use barriers.
+   To find these: profile many repetitions, keep the stacks whose leaf frames
+   are in `jl_f__compute_sparams`, `exists_subtype`, `jl_subtype`,
+   `jl_apply_generic`, and attribute each to the innermost Dagger source line
+   (`LLM_info/bench/prof_dyn.jl`); after the fixes that share fell to ~4 % on
+   both plain `@spawn` and a Datadeps Cholesky.
+
