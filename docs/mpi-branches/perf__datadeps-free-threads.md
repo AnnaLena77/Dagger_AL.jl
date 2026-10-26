@@ -2,7 +2,7 @@
 
 > Under MPI, let a Datadeps task run on any free thread of its rank, instead of waiting for the thread the plan named.
 
-**Builds on:** `perf/task-overhead` (the free-threads default of `FREE_MPI_THREADS`). Changes: `ext/MPIExt.jl` (`mpi_thread_requested`), `src/submission.jl` (`FREE_DATADEPS_THREADS`, `free_datadeps_threads!`), `src/Dagger.jl` (`JULIA_DAGGER_FREE_DATADEPS_THREADS`, default `1`).
+**Builds on:** `perf/task-overhead` (the free-threads default of `FREE_MPI_THREADS`). Changes: `ext/MPIExt.jl` (`mpi_thread_requested`), `src/submission.jl` (`FREE_DATADEPS_THREADS`, `free_datadeps_threads!`), `src/Dagger.jl` (`JULIA_DAGGER_FREE_DATADEPS_THREADS`, default `0`: **opt-in, see "Known problem"**).
 
 ## Why
 
@@ -12,7 +12,7 @@ Found with the occupancy timeline (`LLM_info/bench/occupancy.jl`, 1 rank x 32 th
 
 ## What it adds
 
-`mpi_thread_requested(opts)` is false for a tagged (Datadeps) task when `FREE_DATADEPS_THREADS[]` is on, so such a task starts migratable and `mpi_execute_inner` runs it unbound. An explicit pin without a tag is still a promise. `JULIA_DAGGER_FREE_DATADEPS_THREADS=0` (or `Dagger.free_datadeps_threads!(false)`) restores the old behaviour; it has no effect when `FREE_MPI_THREADS` is off.
+`mpi_thread_requested(opts)` is false for a tagged (Datadeps) task when `FREE_DATADEPS_THREADS[]` is on, so such a task starts migratable and `mpi_execute_inner` runs it unbound. An explicit pin without a tag is still a promise. `JULIA_DAGGER_FREE_DATADEPS_THREADS=1` (or `Dagger.free_datadeps_threads!(true)`) turns it on; it has no effect when `FREE_MPI_THREADS` is off.
 
 ## Measured effect
 
@@ -25,3 +25,8 @@ Fulda, Cholesky 8192/256, interleaved, 3 rounds x 5 samples, medians, off -> on:
 ## Limits and notes
 
 With several ranks the gain shrinks (4 x 16: -1.5 %): there the time is in cross-rank transfers and per-rank planning, which this does not touch. A task that runs unbound may land on thread 1, which plans; `DATADEPS_AVOID_DRIVER` only steers the planner's label, not the thread an unbound task starts on.
+
+## Known problem (why it is off)
+
+With the switch on, the stencil tests deadlock at 2 ranks x 4 threads on Fulda: the full MPI suite 2 x 4 ended 1889 passed / 7 errored, and the stencil section alone hangs for good (it only runs slowly with the switch off). Task backtraces: rank 0 waits in `mpi_execute_bcast_plan` / `bcast_slot_wait` for a result type; rank 1 has no task in `mpi_execute_body`, every pooled slot idle, its main task in `wait_all`: the owner tasks on rank 1 are never started. 4 x 2 passes. The measured gain above is real, so the next step is to find why the owner tasks are not launched (processor occupancy/capacity for unbound tasks, the migratable slot cache, thread 1 hosting the relay) and then turn it on again. `LLM_info/bench/mpi_script.sbatch` + `st_dump.jl` reproduce and dump it.
+

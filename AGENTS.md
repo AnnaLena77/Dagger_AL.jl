@@ -1322,7 +1322,10 @@ lesson.
    (`JULIA_DAGGER_UNIFORM_DEFER_MAX=1000000`), run the same DAG with 16x16 tiles so the
    kernels vanish (pure runtime throughput: MPI was *faster* than shared memory), and read
    per-thread kernel seconds (`bench/occupancy.jl`). Letting a tagged task run on any free
-   thread of its rank (`FREE_DATADEPS_THREADS`, default on) took 1 x 64 from 1.33-1.53 s
-   to 1.04-1.10 s. Also: piping a launcher such as `test/mpi/run.jl` into `head -N` closes
+   thread of its rank (`FREE_DATADEPS_THREADS`, **opt-in**) took 1 x 64 from 1.33-1.53 s
+   to 1.04-1.10 s, but it deadlocks the 2 ranks x 4 threads stencil tests on Fulda (owner tasks
+   on one rank are never started while the other rank waits for their result type), so it stays
+   off until that is understood; a green laptop run of the same tests (108/108) did not show it,
+   and a 4 x 2 full suite passed: run the full suite at the layout you ship (2 x 4) on the cluster. Also: piping a launcher such as `test/mpi/run.jl` into `head -N` closes
    its stdout after N lines and leaves the ranks hanging; redirect to a file instead.
 
