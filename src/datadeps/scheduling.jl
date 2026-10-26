@@ -37,9 +37,15 @@ function datadeps_schedule_task(sched::RoundRobinScheduler, state::DataDepsState
         # `InvalidScope` and the compatibility check is skippable; all that
         # remains of `proc_in_scope(proc, DefaultScope())` is its lone
         # `DefaultEnabledTaint`, i.e. `default_enabled(proc)`.
-        while !default_enabled(our_proc)
+        # Under uniform execution the driver thread is skipped for a task that names no processor
+        # (see `DATADEPS_AVOID_DRIVER`); a task with a scope of its own keeps whatever it names. Bounded,
+        # so a list made only of driver threads (one thread per rank) still places the task.
+        avoid = DATADEPS_AVOID_DRIVER[] && uniform_execution()
+        skipped = 0
+        while !default_enabled(our_proc) || (avoid && skipped < length(all_procs) - 1 && is_driver_thread_proc(our_proc))
             proc_idx = mod1(proc_idx + 1, length(all_procs))
             our_proc = all_procs[proc_idx]
+            skipped += 1
         end
     else
         if isa(constrain(task_scope, all_scope), InvalidScope)

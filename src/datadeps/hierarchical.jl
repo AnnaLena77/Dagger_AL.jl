@@ -311,12 +311,6 @@ scope is the whole memory space).
 """
 const DATADEPS_AVOID_DRIVER = Ref(false)
 
-"The processors of a partition without the driver thread's, when that leaves at least one."
-function avoid_driver_thread(procs::Vector{<:Processor})
-    (DATADEPS_AVOID_DRIVER[] && uniform_execution()) || return procs
-    keep = Processor[p for p in procs if !is_driver_thread_proc(p)]
-    return isempty(keep) ? procs : keep
-end
 
 ### Planning instrumentation ###
 #
@@ -1615,7 +1609,6 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
                                          value_dep_verts::Set{Int},
                                          task_metas::Vector{HierarchicalTaskMeta})
     n_partitions = length(partitions)
-    partition_procs = [avoid_driver_thread(p) for p in partition_procs]
     temp_queues = Vector{DataDepsTaskQueue}(undef, n_partitions)
     local_scopes = Vector{AbstractScope}(undef, n_partitions)
     proc_to_scope_lfus = [BasicLFUCache{Processor,AbstractScope}(1024) for _ in 1:n_partitions]
