@@ -300,7 +300,7 @@ const DATADEPS_SLOT_WINDOW = Ref(128)
 
 """
 Whether uniform (MPI) Datadeps planning keeps its tasks off the driver thread (thread 1) of each rank.
-`JULIA_DAGGER_AVOID_DRIVER_THREAD` sets it at startup.
+On by default; `JULIA_DAGGER_AVOID_DRIVER_THREAD=0` turns it off at startup.
 
 Uniform planning pins every task to the processor the scheduler chose, round-robin over the canonical
 processor list, which starts with thread 1 of rank 0: the thread that is busy planning. A task pinned
@@ -309,7 +309,7 @@ there cannot start until planning yields it, and the first one is the critical p
 started at 0.748 s, when the 0.70 s of planning ended, against 0.063 s in shared memory (where a task's
 scope is the whole memory space).
 """
-const DATADEPS_AVOID_DRIVER = Ref(false)
+const DATADEPS_AVOID_DRIVER = Ref(true)
 
 
 ### Planning instrumentation ###
