@@ -1329,3 +1329,16 @@ lesson.
    and a 4 x 2 full suite passed: run the full suite at the layout you ship (2 x 4) on the cluster. Also: piping a launcher such as `test/mpi/run.jl` into `head -N` closes
    its stdout after N lines and leaves the ranks hanging; redirect to a file instead.
 
+115. **Concurrent jobs of one user are packed onto one node; a result from a shared
+   node is not a result.** Six of my jobs (8 cores each, `--bind-to core`) landed on
+   `compute-00` together while compute-01..07 were idle. On the 32-FPU Opterons that is
+   enough contention for the MPI deadlock detector to fire in a suite that passes alone:
+   the *validated baseline* "hung" and a switch-off build showed the same 7 errors as the
+   switch-on build, and I spent hours on a deadlock theory (check-order race, owner tasks
+   never started) that explained a loaded node, not the code. Before attributing a
+   cross-rank failure to a change: look at `squeue -o "%i %j %N"` for what else shares the
+   node, run the correctness suites and every A/B with `--exclusive -w compute-0N`, one per
+   node, and always include the known-good baseline in the same setting. A standalone
+   extract of a test section is not the suite (mine could not finish in 30 minutes even
+   on the baseline); if the baseline fails in your instrument, the instrument is wrong.
+
