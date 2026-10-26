@@ -572,13 +572,13 @@ elide_foreign_tasks!(on::Bool=true) = (ELIDE_FOREIGN_TASKS[] = on)
 """
     FREE_MPI_THREADS
 
-Opt-in switch (`Dagger.free_mpi_threads!`, or `JULIA_DAGGER_FREE_MPI_THREADS=1` at startup).
+On by default since 2026-10-26 (`Dagger.free_mpi_threads!(false)`, or `JULIA_DAGGER_FREE_MPI_THREADS=0` at startup, turns it off).
 An MPI task runs on the thread of the processor it was placed on, so it waits behind
 whatever else occupies that thread, even when nobody asked for that thread. With the
 switch on, a task whose scope does not name a single processor runs on any free thread
 of its rank; a task pinned with an `ExactScope` (and Datadeps tasks) stays bound.
 """
-const FREE_MPI_THREADS = Ref{Bool}(false) # set from the environment in `__init__`
+const FREE_MPI_THREADS = Ref{Bool}(true) # set from the environment in `__init__`
 free_mpi_threads!(on::Bool=true) = (FREE_MPI_THREADS[] = on)
 
 """
