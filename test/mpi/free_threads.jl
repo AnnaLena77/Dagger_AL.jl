@@ -59,6 +59,8 @@ end
     others = filter(p -> p.rank != rank, cpus)
     tid_for = Dagger.Sch.task_tid_for_processor
     spec(opts) = (; options = opts)    # the hook only reads `task.options`
+    # N.B. The first testset is skipped on fewer than 3 threads, so do not rely on it having left the switch off
+    Dagger.free_mpi_threads!(false)
     @test tid_for(mine, spec(Dagger.Options())) == mine.innerProc.tid
     # A processor of another rank has no thread here
     isempty(others) || @test tid_for(first(others), spec(Dagger.Options())) === nothing
