@@ -79,7 +79,7 @@ end
             # ... while an explicit pin without a tag is still a promise
             @test tid_for(mine, spec(Dagger.Options(; scope=Dagger.ExactScope(mine)))) == mine.innerProc.tid
         finally
-            Dagger.free_datadeps_threads!(true)    # the default
+            Dagger.free_datadeps_threads!(false)    # the default
         end
     finally
         Dagger.free_mpi_threads!(false)
