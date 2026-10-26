@@ -21,6 +21,9 @@ task before the tasks ahead of it are planned (in order), which is what lets
 `schedule_slot_window!` batch the slot aliasing exchanges of a window of tasks.
 """
 datadeps_schedule_is_stateless(::DataDepsScheduler) = false
+
+"Whether `proc` is the thread that plans (and submits from) a Datadeps region; see `DATADEPS_AVOID_DRIVER`."
+is_driver_thread_proc(::Processor) = false
 datadeps_schedule_is_stateless(::RoundRobinScheduler) = true
 function datadeps_schedule_task(sched::RoundRobinScheduler, state::DataDepsState, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
     proc_idx = sched.proc_idx

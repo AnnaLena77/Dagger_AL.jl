@@ -298,6 +298,26 @@ the peers compute).
 """
 const DATADEPS_SLOT_WINDOW = Ref(128)
 
+"""
+Whether uniform (MPI) Datadeps planning keeps its tasks off the driver thread (thread 1) of each rank.
+`JULIA_DAGGER_AVOID_DRIVER_THREAD` sets it at startup.
+
+Uniform planning pins every task to the processor the scheduler chose, round-robin over the canonical
+processor list, which starts with thread 1 of rank 0: the thread that is busy planning. A task pinned
+there cannot start until planning yields it, and the first one is the critical path of most graphs
+(a Cholesky's first `potrf`), so on an 8192^2 / 256^2-tile Cholesky with one rank the first kernel
+started at 0.748 s, when the 0.70 s of planning ended, against 0.063 s in shared memory (where a task's
+scope is the whole memory space).
+"""
+const DATADEPS_AVOID_DRIVER = Ref(false)
+
+"The processors of a partition without the driver thread's, when that leaves at least one."
+function avoid_driver_thread(procs::Vector{<:Processor})
+    (DATADEPS_AVOID_DRIVER[] && uniform_execution()) || return procs
+    keep = Processor[p for p in procs if !is_driver_thread_proc(p)]
+    return isempty(keep) ? procs : keep
+end
+
 ### Planning instrumentation ###
 #
 # Where a region's planning time went, per phase, printed once per region when
@@ -1595,6 +1615,7 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
                                          value_dep_verts::Set{Int},
                                          task_metas::Vector{HierarchicalTaskMeta})
     n_partitions = length(partitions)
+    partition_procs = [avoid_driver_thread(p) for p in partition_procs]
     temp_queues = Vector{DataDepsTaskQueue}(undef, n_partitions)
     local_scopes = Vector{AbstractScope}(undef, n_partitions)
     proc_to_scope_lfus = [BasicLFUCache{Processor,AbstractScope}(1024) for _ in 1:n_partitions]
