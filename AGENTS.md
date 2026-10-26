@@ -1295,3 +1295,17 @@ lesson.
    undercount native BLAS time, and `K/(wall x threads)` is the cheap sanity check
    (87 / 79 / 52 / 24 % at 8 / 16 / 32 / 64 threads).
 
+113. **A serial pre-pass is the cheapest place to find a dynamic dispatch, because
+   `HIER_TIMING` already times it and nothing hides it.** Under MPI the hierarchical
+   planner's pre-scan runs on one thread before the first task starts, so its cost is
+   pure latency: 195 ms for 5984 tasks (33 us/task), identical in every rep. A profile
+   limited to its frames named `type_may_alias(typeof(arg))`, `unwrap_inout`, the
+   `deps` loop, `ArgumentWrapper` and the `_cached_get!` closures: `arg` came from
+   `fargs[i]` and `fetch(...; raw=true)`, so it was abstract and each of those was a
+   dynamic dispatch (lessons 21, 111). One function barrier per argument
+   (`_collect_arg_meta!` -> `_collect_arg_value!`) halved it to 91-101 ms in 12/12
+   reps. Before optimizing a per-region phase, read the per-phase times of
+   `JULIA_DAGGER_HIER_TIMING=1` for the configuration you care about (1 rank MPI,
+   32 threads): the profile's planner section here was dominated by warm-up and the
+   copy-to region and pointed at aliasing, which the phase timer showed is 12 ms of 1.5 s.
+
