@@ -2234,12 +2234,10 @@ const KICK_CURSOR = Threads.Atomic{Int}(0)
 # recycle the specs. Tests set it to a sleep to make that window wide; `nothing` (the default) costs one load and compare per batch.
 const AFTER_ENQUEUE_HOOK = Ref{Any}(nothing)
 
-function do_tasks(to_proc, return_queue, tasks)
-    @dagdebug nothing :processor "Enqueuing task batch" batch_size=length(tasks)
-
-    ctx_vars = first(tasks).ctx_vars::NamedTuple
-    ctx = Dagger.log_context(ctx_vars.log_sink, ctx_vars.profile)
-    uid = first(tasks).sch_uid
+# The first batch for a processor creates its state and runner. Kept out of `do_tasks`: `start_event` is
+# assigned inside the closure below and read after it, which makes it a `Core.Box` -- and `do_tasks` would
+# allocate that box on every call, not only on this first one
+function create_proc_state!(ctx, uid::UInt64, to_proc, return_queue)
     start_event = nothing
     state = proc_state!(uid, to_proc) do
         # Initialize the processor state and runner
@@ -2264,8 +2262,20 @@ function do_tasks(to_proc, return_queue, tasks)
         end
         return ProcessorState(istate, runner)
     end
-    if start_event !== nothing
-        notify(start_event)
+    # `proc_state!` runs the closure only if no other thread created the state first
+    return state, start_event
+end
+
+function do_tasks(to_proc, return_queue, tasks)
+    @dagdebug nothing :processor "Enqueuing task batch" batch_size=length(tasks)
+
+    ctx_vars = first(tasks).ctx_vars::NamedTuple
+    ctx = Dagger.log_context(ctx_vars.log_sink, ctx_vars.profile)
+    uid = first(tasks).sch_uid
+    state = maybe_proc_state(uid, to_proc)
+    if state === nothing
+        state, start_event = create_proc_state!(ctx, uid, to_proc, return_queue)
+        start_event === nothing || notify(start_event)
     end
     istate = state.state
     queued_counter = istate.queued

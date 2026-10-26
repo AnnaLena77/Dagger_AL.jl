@@ -66,11 +66,15 @@ end
 
 function fast_compat_entry(accel, scope, procs::Vector{<:Processor})
     key = (objectid(accel), scope_key(scope))
-    entry = get(@atomic(FAST_INDEX.dict), key, nothing)
-    if entry !== nothing && entry.scope === scope && entry.procs == procs
-        return entry::CompatEntry
+    hit = get(@atomic(FAST_INDEX.dict), key, nothing)
+    if hit !== nothing && hit.scope === scope && hit.procs == procs
+        return hit::CompatEntry
     end
-    entry = compat_entry(accel, scope, procs)
+    return fast_index_store!(key, compat_entry(accel, scope, procs))
+end
+# N.B. Not inline in `fast_compat_entry`: a variable that a `do` closure captures and that is also
+# reassigned becomes a `Core.Box`, allocated on every call, hit or not
+function fast_index_store!(key, entry::CompatEntry)
     lock(FAST_INDEX_LOCK) do
         dict = @atomic FAST_INDEX.dict
         if haskey(dict, key) || length(dict) < FAST_INDEX_MAX
