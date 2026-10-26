@@ -183,7 +183,10 @@ placement sorts a given candidate set once, not once per task. The returned
 vector is shared: callers must not mutate it.
 """
 function compatible_processors_ordered(accel, scope, procs::Vector{<:Processor})
-    entry = compat_entry(accel, scope, procs)
+    # The lock-free snapshot of the local fast path (see fastpath.jl) instead of the cache behind one lock:
+    # every placing thread of every task took that lock, 12-29 us per task at 64 threads on the Opterons.
+    # Same entries, same canonical order; a miss falls through to `compat_entry`.
+    entry = LOCAL_FASTPATH[] ? fast_compat_entry(accel, scope, procs) : compat_entry(accel, scope, procs)
     ordered = entry.ordered
     if ordered === nothing
         ordered = Dagger.sort_processors_canonical!(Vector{Processor}(collect(entry.compat)), accel)
