@@ -570,6 +570,15 @@ const ELIDE_FOREIGN_TASKS = Ref{Bool}(false) # set from the environment in `__in
 elide_foreign_tasks!(on::Bool=true) = (ELIDE_FOREIGN_TASKS[] = on)
 
 """
+    ELIDE_DATADEPS_TASKS
+
+EXPERIMENTAL, off by default (`JULIA_DAGGER_ELIDE_DATADEPS=1`; implies `ELIDE_FOREIGN_TASKS`). Also lets a rank skip the
+tasks of a Datadeps region that it does not run: the ones that carry a tag and syncdeps. Failures of such a task are not
+yet reported to the other ranks.
+"""
+const ELIDE_DATADEPS_TASKS = Ref{Bool}(false)
+
+"""
     FREE_MPI_THREADS
 
 On by default since 2026-10-26 (`Dagger.free_mpi_threads!(false)`, or `JULIA_DAGGER_FREE_MPI_THREADS=0` at startup, turns it off).
