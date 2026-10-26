@@ -584,11 +584,15 @@ free_mpi_threads!(on::Bool=true) = (FREE_MPI_THREADS[] = on)
 """
     FREE_DATADEPS_THREADS
 
-Experimental, off by default (`Dagger.free_datadeps_threads!`, or `JULIA_DAGGER_FREE_DATADEPS_THREADS=1` at startup).
-With [`FREE_MPI_THREADS`](@ref) on, a Datadeps task of an MPI rank still stays on the thread the plan named. With this
-switch it runs on any free thread of its rank instead, as it does in shared memory.
+On by default since 2026-10-26 (`Dagger.free_datadeps_threads!(false)`, or `JULIA_DAGGER_FREE_DATADEPS_THREADS=0` at
+startup, turns it off). With [`FREE_MPI_THREADS`](@ref) on, a Datadeps task of an MPI rank used to stay on the thread
+the plan named, although the plan names it only to say which rank runs the task. A ready task then waited for its
+planned thread while other threads of the rank were idle (1 rank x 32 threads, Cholesky 8192/256: mean concurrency
+14.3 of 32, against 22.6 in shared memory). With this switch the task runs on any free thread of its rank, as it does
+in shared memory: same Cholesky 1.60 -> 1.12-1.16 s (1 x 32), 1.33-1.53 -> 1.04-1.10 s (1 x 64), 1.72 -> 1.55 s
+(2 x 32), 1.89 -> 1.86 s (4 x 16, medians of 3 interleaved rounds).
 """
-const FREE_DATADEPS_THREADS = Ref{Bool}(false) # set from the environment in `__init__`
+const FREE_DATADEPS_THREADS = Ref{Bool}(true)  # set from the environment in `__init__`
 free_datadeps_threads!(on::Bool=true) = (FREE_DATADEPS_THREADS[] = on)
 
 """

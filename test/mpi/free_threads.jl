@@ -67,16 +67,17 @@ end
     try
         @test tid_for(mine, spec(Dagger.Options())) === nothing
         @test tid_for(mine, spec(Dagger.Options(; scope=Dagger.ExactScope(mine)))) == mine.innerProc.tid
-        # A Datadeps task (tagged) names its processor for the plan, so it stays bound unless asked otherwise
+        # A Datadeps task (tagged) names its processor for the plan; it is bound only if free_datadeps_threads! is off
         datadeps_opts = Dagger.Options(; scope=Dagger.ExactScope(mine), tag=1)
-        @test tid_for(mine, spec(datadeps_opts)) == mine.innerProc.tid
-        Dagger.free_datadeps_threads!(true)
+        Dagger.free_datadeps_threads!(false)
         try
+            @test tid_for(mine, spec(datadeps_opts)) == mine.innerProc.tid
+            Dagger.free_datadeps_threads!(true)
             @test tid_for(mine, spec(datadeps_opts)) === nothing
             # ... while an explicit pin without a tag is still a promise
             @test tid_for(mine, spec(Dagger.Options(; scope=Dagger.ExactScope(mine)))) == mine.innerProc.tid
         finally
-            Dagger.free_datadeps_threads!(false)
+            Dagger.free_datadeps_threads!(true)    # the default
         end
     finally
         Dagger.free_mpi_threads!(false)
