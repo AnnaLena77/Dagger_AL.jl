@@ -1309,3 +1309,20 @@ lesson.
    32 threads): the profile's planner section here was dominated by warm-up and the
    copy-to region and pointed at aliasing, which the phase timer showed is 12 ms of 1.5 s.
 
+114. **A scope that names one processor is not always a request for that thread.**
+   Datadeps gives every task an `ExactScope` so that the plan can say *which rank* runs
+   it, and under MPI `FREE_MPI_THREADS` read that as a promise to stay on the named thread
+   ("pinned tasks and Datadeps tasks stay bound"). A ready task then waited for its planned
+   thread while others sat idle: 1 rank x 32 threads ran Cholesky 8192/256 at mean
+   concurrency 14.4 of 32 against 22.6 in shared memory, with identical kernel time per
+   thread (0.73 s median) and a balanced total, so every per-thread total hid it. The
+   discriminator was the *idle fraction per thread* (54 % vs 27 % of the wall), not the
+   per-thread sum. Before blaming the planner or the runtime path, rule them out in this
+   order, each with one probe: plan everything first and look at the execution window
+   (`JULIA_DAGGER_UNIFORM_DEFER_MAX=1000000`), run the same DAG with 16x16 tiles so the
+   kernels vanish (pure runtime throughput: MPI was *faster* than shared memory), and read
+   per-thread kernel seconds (`bench/occupancy.jl`). Letting a tagged task run on any free
+   thread of its rank (`FREE_DATADEPS_THREADS`, default on) took 1 x 64 from 1.33-1.53 s
+   to 1.04-1.10 s. Also: piping a launcher such as `test/mpi/run.jl` into `head -N` closes
+   its stdout after N lines and leaves the ranks hanging; redirect to a file instead.
+
