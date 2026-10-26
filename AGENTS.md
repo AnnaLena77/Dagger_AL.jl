@@ -1278,3 +1278,20 @@ lesson.
    (`LLM_info/bench/prof_dyn.jl`); after the fixes that share fell to ~4 % on
    both plain `@spawn` and a Datadeps Cholesky.
 
+112. **Size a scheduler bottleneck with Little's law, and measure kernel time under
+   load, not alone.** Mean concurrency = throughput x mean task duration. A
+   timeline of when each tile kernel starts and ends (`LLM_info/bench/occupancy.jl`)
+   gave, for Cholesky 8192/256 on 64 threads of the Opterons: 5984 tasks in
+   1.137 s = 5250 tasks/s, kernels 4.69 ms each when 64 run at once (28.1 thread-
+   seconds against 17.1 sequentially: shared FPUs and memory make them 1.64x
+   slower), so the expected concurrency is 24.6 and the measured one was 24.7 of
+   64. The runtime was starved by task *throughput* (~190 us of serial work per
+   task), while a backlog of ready tasks existed and every sampled "CPU load" or
+   "idle thread" figure pointed elsewhere. Consequences: the ideal wall time is
+   `K_parallel / threads` (0.44 s here), not `K_sequential / threads` (0.27 s);
+   to keep T threads busy with tasks of duration d the runtime must sustain
+   T/d tasks per second (13.6k/s here); and any change should be judged by the
+   throughput it adds, which the same timeline reports directly. Sampling profiles
+   undercount native BLAS time, and `K/(wall x threads)` is the cheap sanity check
+   (87 / 79 / 52 / 24 % at 8 / 16 / 32 / 64 threads).
+
