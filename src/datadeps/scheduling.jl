@@ -21,6 +21,9 @@ task before the tasks ahead of it are planned (in order), which is what lets
 `schedule_slot_window!` batch the slot aliasing exchanges of a window of tasks.
 """
 datadeps_schedule_is_stateless(::DataDepsScheduler) = false
+
+"Whether `proc` is the thread that plans (and submits from) a Datadeps region; see `DATADEPS_AVOID_DRIVER`."
+is_driver_thread_proc(::Processor) = false
 datadeps_schedule_is_stateless(::RoundRobinScheduler) = true
 function datadeps_schedule_task(sched::RoundRobinScheduler, state::DataDepsState, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
     proc_idx = sched.proc_idx
@@ -34,9 +37,15 @@ function datadeps_schedule_task(sched::RoundRobinScheduler, state::DataDepsState
         # `InvalidScope` and the compatibility check is skippable; all that
         # remains of `proc_in_scope(proc, DefaultScope())` is its lone
         # `DefaultEnabledTaint`, i.e. `default_enabled(proc)`.
-        while !default_enabled(our_proc)
+        # Under uniform execution the driver thread is skipped for a task that names no processor
+        # (see `DATADEPS_AVOID_DRIVER`); a task with a scope of its own keeps whatever it names. Bounded,
+        # so a list made only of driver threads (one thread per rank) still places the task.
+        avoid = DATADEPS_AVOID_DRIVER[] && uniform_execution()
+        skipped = 0
+        while !default_enabled(our_proc) || (avoid && skipped < length(all_procs) - 1 && is_driver_thread_proc(our_proc))
             proc_idx = mod1(proc_idx + 1, length(all_procs))
             our_proc = all_procs[proc_idx]
+            skipped += 1
         end
     else
         if isa(constrain(task_scope, all_scope), InvalidScope)
