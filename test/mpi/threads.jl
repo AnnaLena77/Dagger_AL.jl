@@ -1,6 +1,9 @@
 # Check actual execution as well as scheduler metadata: a rank-wide scope
 # used to discard Datadeps' thread choice, sending every task to the first
 # thread. MPI disables work stealing, so that choice was never corrected.
+# The thread a task ran on is the planner's choice only with free MPI threads off (see spawn.jl).
+const THREADS_FREE_BEFORE = Dagger.FREE_MPI_THREADS[]
+Dagger.free_mpi_threads!(false)
 mpi_thread_location() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())
 
 @testset "Datadeps thread placement" begin
@@ -10,8 +13,11 @@ mpi_thread_location() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())
     # IDs start at 1 (Julia can also have an interactive thread pool).
     last_cpus = [last(filter(p -> p.rank == r, cpus)) for r in 0:nranks-1]
     thread_scope = Dagger.UnionScope(map(Dagger.ExactScope, last_cpus))
+    # Unscoped tasks of a uniform region avoid the driver thread (thread 1 of each rank) when the rule is on
+    avoid_cpus = Dagger.DATADEPS_AVOID_DRIVER[] ? filter(p -> !Dagger.is_driver_thread_proc(p), cpus) : cpus
+    default_cpus = isempty(avoid_cpus) ? cpus : avoid_cpus
     cases = (
-        ("default", (;), cpus),
+        ("default", (;), default_cpus),
         ("rank scope", (; scope=Dagger.scope(mpi_rank=nranks-1)), rank_cpus),
         ("compute scope", (; compute_scope=thread_scope), last_cpus),
         ("exact scope", (; scope=Dagger.ExactScope(last(cpus))), [last(cpus)]),
@@ -40,3 +46,4 @@ mpi_thread_location() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())
         end
     end
 end
+Dagger.free_mpi_threads!(THREADS_FREE_BEFORE)

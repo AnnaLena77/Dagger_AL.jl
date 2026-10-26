@@ -1,5 +1,10 @@
 # Plain eager tasks need a uniform placement decision even when ranks make
 # progress at different speeds. Check actual execution, scopes, and locality.
+# These tests check where the *planner* put each task, thread included. With free MPI threads (the default) an unscoped
+# task may run on any free thread of its rank, so the thread is only the planner's choice with the switch off; free
+# threads have their own tests (`free_threads.jl`).
+const SPAWN_FREE_BEFORE = Dagger.FREE_MPI_THREADS[]
+Dagger.free_mpi_threads!(false)
 mpi_spawn_location(x=nothing) = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid(), x)
 mpi_spawn_value() = (sleep(0.05); 42)
 mpi_spawn_value_fast(i) = 42 + i - i
@@ -107,3 +112,4 @@ reftid_size() = lock(d -> length(d), MPIExt._MPIREF_TID)
     @test fetch(t) == 42
     @test allequal(MPI.Allgather(Int(t.uid), comm))
 end
+Dagger.free_mpi_threads!(SPAWN_FREE_BEFORE)
