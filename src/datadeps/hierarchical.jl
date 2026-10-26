@@ -747,7 +747,19 @@ function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
                                       task_to_idx::IdDict{DTask,Int})
     for task_idx in range
         pair = seen_tasks[task_idx]
-        spec = pair.spec
+        # One dispatch onto the concrete spec type per task (see `eager_launch!`)
+        task_metas[task_idx] = _collect_task_meta!(
+            pair.spec, pair, task_idx, unique_arg_ws, supports_cache, raw_arg_cache,
+            cache_lock, task_to_idx)
+    end
+end
+function _collect_task_meta!(spec::DTaskSpec, pair::DTaskPair, task_idx::Int,
+                             unique_arg_ws::Dict{ArgumentWrapper,ArgumentWrapper},
+                             supports_cache::IdDict{Any,Bool},
+                             raw_arg_cache::IdDict{Any,Any},
+                             cache_lock::Union{ReentrantLock,Nothing},
+                             task_to_idx::IdDict{DTask,Int})
+    let
         task = pair.task
         fargs = spec.fargs
 
@@ -816,7 +828,7 @@ function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
             end
         end
 
-        task_metas[task_idx] = HierarchicalTaskMeta(
+        return HierarchicalTaskMeta(
             pair, first_chunk, task_may_alias, task_inplace, all_deps, value_deps
         )
     end
@@ -1186,7 +1198,7 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
         read_affinity = zeros(Int, n_owners)
         for v in 1:n
             meta = task_metas[v]
-            task_scope = @something(meta.pair.spec.options.compute_scope, meta.pair.spec.options.scope, default_scope)
+            task_scope = @something(getfield(getfield(meta.pair.spec, :options), :compute_scope), getfield(getfield(meta.pair.spec, :options), :scope), default_scope)
 
             # Owners whose processors are eligible under this task's scope.
             # A non-default scope that spans multiple owners must still spread
@@ -1265,7 +1277,7 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
         partition_load = zeros(Int, n_partitions)
         for v in topo
             meta = task_metas[v]
-            task_scope = @something(meta.pair.spec.options.compute_scope, meta.pair.spec.options.scope, default_scope)
+            task_scope = @something(getfield(getfield(meta.pair.spec, :options), :compute_scope), getfield(getfield(meta.pair.spec, :options), :scope), default_scope)
 
             if task_scope != default_scope
                 assigned = false
@@ -1338,13 +1350,16 @@ function _schedule_vertex!(v::Int, partition_id::Int,
     spec = pair.spec
     task = pair.task
 
-    if spec.options.syncdeps === nothing
-        spec.options.syncdeps = Set{ThunkSyncdep}()
+    # N.B. `spec` is abstractly typed here (`DTaskPair.spec`); read `options` with
+    # `getfield` rather than the dispatching `spec.options` (see `eager_launch!`)
+    opts = getfield(spec, :options)
+    if opts.syncdeps === nothing
+        opts.syncdeps = Set{ThunkSyncdep}()
     end
     for pred_v in inneighbors(dag, v)
         if vertex_to_partition[pred_v] != partition_id
             pred_task = seen_tasks[pred_v].task
-            push!(spec.options.syncdeps, ThunkSyncdep(pred_task))
+            push!(opts.syncdeps, ThunkSyncdep(pred_task))
         end
     end
 
