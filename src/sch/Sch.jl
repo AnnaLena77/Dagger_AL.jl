@@ -1696,6 +1696,22 @@ function Base.notify(db::Doorbell)
 end
 end
 
+"""
+    QueueKey(occupancy, priority)
+
+Ordering key of a processor's task queue: the smaller `occupancy` first, as before, and among equal
+occupancies the higher `priority` (`Options.priority`; `0` by default). The tie used to be left to the
+heap, i.e. an arbitrary task of equal occupancy ran next.
+"""
+struct QueueKey
+    occupancy::UInt32
+    neg_priority::Int32   # smaller pops first
+end
+QueueKey(occupancy::UInt32, priority::Int) = QueueKey(occupancy, Int32(-clamp(priority, -2^30, 2^30)))
+Base.isless(a::QueueKey, b::QueueKey) =
+    a.occupancy < b.occupancy || (a.occupancy == b.occupancy && a.neg_priority < b.neg_priority)
+
+
 mutable struct ProcessorInternalState
     # Refreshed by `do_tasks` on every batch so the long-lived runner observes
     # log-sink toggles (`enable_logging!`/`disable_logging!`); all other fields
@@ -1703,7 +1719,7 @@ mutable struct ProcessorInternalState
     ctx::Context
     proc::Processor
     return_queue::RemoteChannel
-    queue::LockedObject{PriorityQueue{TaskSpec, UInt32, Base.Order.ForwardOrdering}}
+    queue::LockedObject{PriorityQueue{TaskSpec, QueueKey, Base.Order.ForwardOrdering}}
     reschedule::Doorbell
     tasks::Dict{Int,Task}
     task_specs::Dict{Int,TaskSpec}
@@ -1843,7 +1859,8 @@ proc_has_occupancy(proc_occupancy, task_occupancy) =
 # The head of `queue` if `to_proc` may run it and has room for it; the caller holds the lock
 function steal_from_queue!(queue, to_proc, proc_occupancy_cached, queued_counter)
     length(queue) == 0 && return nothing
-    task, occupancy = first(queue)
+    task, key = first(queue)
+    occupancy = key.occupancy
     scope = task.scope::Dagger.AbstractScope
     accel = something((task.options::Options).acceleration, Dagger.DistributedAcceleration())
     if Dagger.proc_in_scope(to_proc, scope) && Dagger.accel_matches_proc(accel, to_proc) &&
@@ -1907,7 +1924,8 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     @dagdebug nothing :processor "Nothing to dequeue"
                     return (nothing, false)
                 end
-                _, occupancy = first(queue)
+                _, key = first(queue)
+                occupancy = key.occupancy
                 if !proc_has_occupancy(proc_occupancy[], occupancy)
                     @dagdebug nothing :processor "Insufficient occupancy" proc_occupancy=proc_occupancy[] task_occupancy=occupancy
                     return (nothing, false)
@@ -1989,7 +2007,8 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
             @label execute
             istate.parked[] = false
-            task, task_occupancy = task_and_occupancy
+            task, queue_key = task_and_occupancy
+            task_occupancy = queue_key.occupancy
             thunk_id = task.thunk_id
             time_util = task.est_time_util
             @logfinish ctx LogProcRunFetch LogProcRunFetchId(uid, wid, to_proc) (;thunk_id, proc_occupancy=proc_occupancy[], task_occupancy)
@@ -2241,7 +2260,7 @@ function create_proc_state!(ctx, uid::UInt64, to_proc, return_queue)
     start_event = nothing
     state = proc_state!(uid, to_proc) do
         # Initialize the processor state and runner
-        queue = PriorityQueue{TaskSpec, UInt32}()
+        queue = PriorityQueue{TaskSpec, QueueKey}()
         queue_locked = LockedObject(queue)
         reschedule = Doorbell()
         istate = ProcessorInternalState(ctx, to_proc, return_queue,
@@ -2330,7 +2349,9 @@ function do_tasks(to_proc, return_queue, tasks)
             push!(kick_scopes, task.scope::Dagger.AbstractScope)
             push!(kick_accels, something((task.options::Options).acceleration, Dagger.DistributedAcceleration()))
             push!(kick_occupancies, occupancy)
-            push!(queue, task => occupancy)
+            # Read before the hand-over: once queued, another runner may recycle the spec (lesson 93)
+            priority = something((task.options::Options).priority, 0)
+            push!(queue, task => QueueKey(occupancy, priority))
             Threads.atomic_add!(queued_counter, 1)
             @logfinish ctx LogEnqueue LogEnqueueId(uid, to_proc, thunk_id) nothing
             @dagdebug thunk_id :processor "Enqueued task"

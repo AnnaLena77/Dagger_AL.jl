@@ -35,6 +35,7 @@ Stores per-task options to be passed to the scheduler.
 - `writes::Union{Vector{Int},Nothing}=nothing`: (Datadeps, set automatically) Indices, among the positional arguments passed to `execute!`, of the arguments this task writes. Lets asynchronous device backends order their own transfers against only the producers of the data they move. `nothing` means unknown.
 - `return_type::Union{Type,Nothing}=nothing`: The expected return type of the task's function. When set to a concrete type, it is used as the task's `chunktype` before the task has run (e.g. so downstream metadata and, under MPI, cross-rank type uniformity are known ahead of execution). When `nothing`, the type is left unknown until the result is available.
 - `lend::Union{Bool,Nothing}=nothing`: (MPI, opt-in) Promise that the task is pure (no in-place writes, no `spawn`, no chunk creation, no collectives) and that its function and arguments can be serialized, so the rank that owns it may lend its *execution* to an idle rank (see [`enable_delegation!`](@ref)). The owner stays the owner of the result. Ignored unless delegation is enabled, and for tasks that name a processor, a rank or a tag. `nothing` and `false` leave every path unchanged.
+- `priority::Union{Int,Nothing}=nothing`: Among tasks waiting in the same processor queue, one with a higher `priority` runs first. `nothing` is `0`; a task that is not waiting (a free processor takes it at once) is not affected. A hint for the critical path of an algorithm (the `potrf` and `trsm` of the next panel of a Cholesky factorization, say), not a guarantee: a running task is never preempted, and processors steal the head of another queue.
 """
 Base.@kwdef mutable struct Options
     propagates::Union{Vector{Symbol},Nothing} = nothing
@@ -80,6 +81,8 @@ Base.@kwdef mutable struct Options
     return_type::Union{Type,Nothing} = nothing
 
     lend::Union{Bool,Nothing} = nothing
+
+    priority::Union{Int,Nothing} = nothing
 end
 Options(::Nothing) = Options()
 function Options(old_options::NamedTuple)
