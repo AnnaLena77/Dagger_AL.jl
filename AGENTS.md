@@ -1376,3 +1376,32 @@ lesson.
    when the *order* moves (a one-line reorder of the probe's own submission loop answers that in one
    job), and does mean concurrency rise?
 
+119. **One node says nothing about the network, and an exclusive allocation does not clear
+   orphans.** Every multi-rank result of the first weeks (2 x 4, 4 x 2, 4 x 16) was one node, so the
+   transport was shared memory and the ranks shared FPUs. One rank per node (4 nodes x 16, 2 nodes x 32,
+   64 threads in total) ran Cholesky 8192/256 at 1.5-1.6 s against ~1.9 s for 4 x 16 on one node and 1.07 s
+   for 1 x 64: node sharing is ~0.3 s of the gap, ~0.4 s is left *with* the network. Report every multi-rank
+   cell as single- or multi-node. Separately, Slurm's `--exclusive` gives you the node but not an empty
+   one: processes of earlier killed jobs of the same user survive (two 1-day-old ones at 100 % CPU and six of
+   mine from the overnight runs were on compute-00, three more on compute-02/03/05) and load the node
+   under your timing. Sweep with `srun --jobid=<job> --overlap ... stray_check.sh` before trusting an A/B,
+   kill orphans (no running job owns them) by explicit PID, and never kill young processes of live jobs.
+
+120. **`JULIA_EXCLUSIVE=1` ignores the process's CPU mask.** It pins thread `i` to CPU `i-1`: under
+   `numactl --cpunodebind=2,3` (CPUs 16-31) the threads still landed on CPUs 0-15, and with several ranks
+   per node every rank would pin onto the same cores. Use `Dagger.pin_threads!()` (pins to the CPUs
+   `sched_getaffinity` allows) and check with `Dagger.threads_pinned()`; a thread-to-NUMA map
+   (`Dagger.numa_threads()`) means something only when the threads are pinned. And a scope over some threads
+   of a rank is not a request for those threads while `FREE_MPI_THREADS` is on: a union-scoped task runs
+   on any free thread (tasks scoped to threads 2, 3 ran on 3, 4, 5).
+
+121. **An MPI `Chunk` is created with the same value on every rank; and per-range Datadeps is 4-30x
+   dearer than per-tile chunks.** `Dagger.tochunk(nothing, proc, space)` on the non-owner ranks gives a
+   `Chunk{Union{}}`, and every task that takes it dies on the spectators with "We should not create a tag
+   during Sch move" (my own probe, not a Dagger bug): pass the value everywhere, the placeholder keeps
+   only its type. `InOut(view(chunk, range))` is correct, concurrent and keeps writes, but costs per task
+   776 us (shared memory, 64 threads), 2.0 ms (MPI, task on another rank) and 5.3 ms (MPI, task on the
+   chunk's rank), because each view makes its own slot chunk (a MemPool round trip) and its own aliasing
+   info; a plain tile chunk is ~170 us. Many fine tasks over one buffer need views created once and reused,
+   or one chunk per tile.
+
