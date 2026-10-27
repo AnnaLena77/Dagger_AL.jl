@@ -933,3 +933,32 @@ end
         @test_skip run_many(300)    # one thread: nothing else can run while do_tasks sleeps
     end
 end
+
+# `priority` orders the tasks waiting in one processor's queue (equal occupancy: all of them here)
+@testset "Task priority" begin
+    if Threads.nthreads() >= 2
+        order = Int[]
+        lk = ReentrantLock()
+        gate = Base.Event()
+        record(i) = (lock(lk) do; push!(order, i); end; i)
+        hold(g) = (wait(g); 0)
+        sc = Dagger.scope(worker=1, thread=2)
+        blocker = Dagger.with_options(scope=sc) do
+            Dagger.@spawn hold(gate)
+        end
+        sleep(0.3)  # the blocker occupies the processor, so everything below waits in its queue
+        ts = map(1:6) do i
+            prio = i == 5 ? 100 : (i == 2 ? 50 : nothing)
+            Dagger.with_options(scope=sc, priority=prio) do
+                Dagger.@spawn record(i)
+            end
+        end
+        sleep(0.3)
+        notify(gate)
+        foreach(fetch, ts); fetch(blocker)
+        @test order[1:2] == [5, 2]
+        @test sort(order) == 1:6
+    else
+        @test_skip false
+    end
+end
