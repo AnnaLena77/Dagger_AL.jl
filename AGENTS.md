@@ -1366,3 +1366,13 @@ lesson.
    fully waited and the ranks released together (lesson 30, 31); an unfenced `copyto!` tail looked like
    0.2-0.7 s of "aliasing" and sent the first reading of this problem in the wrong direction.
 
+118. **A slow dependency chain with idle threads is not automatically a scheduling-order problem.**
+   The Cholesky `potrf` chain ran at 42-49 ms per panel against ~10 ms of kernel time with half the
+   threads idle, which reads like ready tasks queueing behind a backlog. A queue priority (panel tasks
+   first) and a submission lookahead (panel k+1 before the trailing updates of k) were each built and
+   measured on exclusive nodes: neither moved the wall time (64 threads 1.03-1.11 s either way). The
+   chain was paced by task throughput (Little's law, lesson 112), so reordering work cannot shorten it.
+   Before building an ordering feature, check the thing it would change: does the chain's pace move
+   when the *order* moves (a one-line reorder of the probe's own submission loop answers that in one
+   job), and does mean concurrency rise?
+
