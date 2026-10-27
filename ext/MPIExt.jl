@@ -1644,7 +1644,13 @@ function start_bcast_relay!(accel_comm::MPI.Comm)
         states[accel_comm] = state
     end
     t = Task(() -> bcast_relay_loop(state))
-    t.sticky = false
+    # N.B. `sticky = false` alone is not enough: a `Task` made on a thread-bound task (the driver, once Distributed
+    # has used `@async`) starts on its creator's thread. The relay would then share the driver's thread, and a driver
+    # parked in a blocking MPI call (an `MPI.Allgather` or `Barrier` in user code) would stop it from forwarding the
+    # broadcasts the other ranks wait for: a cross-rank cycle (it hung the full MPI suite across two nodes, where
+    # those collectives take longer than in shared memory). Lesson 98 made the lend service migratable and left this
+    # task bound.
+    Dagger.set_task_migratable!(t)
     schedule(t)
     Dagger.Sch.errormonitor_tracked("mpi_bcast_relay", t)
     state.relay = t
