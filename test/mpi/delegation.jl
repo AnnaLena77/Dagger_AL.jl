@@ -110,6 +110,7 @@ deleg_boom(i::Int, secs::Float64) = (sleep(secs); error("boom $i from rank $(MPI
 deleg_where(x) = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid(), x)
 deleg_plain(i::Int) = i + 1
 deleg_chunk_busy(c, i::Int, secs::Float64) = deleg_busy(i, secs)
+deleg_sum_busy(c, v::Vector{Float64}, i::Int, secs::Float64) = (sleep(secs); sum(v) + i)
 
 function deleg_counters()
     st = Dagger.delegation_stats()
@@ -205,6 +206,57 @@ deleg_total(v) = Dagger.allreduce_value(+, v; comm)
         @test deleg_counters() == before
         free = [Dagger.@spawn lend=true deleg_busy(i, 0.03) for i in 1:16]
         @test first.(fetch.(free)) == [i * i for i in 1:16]
+    end
+
+    @testset "argument cache and size cap" begin
+        # Large shared arguments travel once per thief; a write after `lend_cache_clear!` is seen; the cap keeps big tasks home
+        Dagger.barrier(; comm)
+        Dagger.disable_delegation!()
+        Dagger.enable_delegation!(slots=2, cache_bytes=8 << 20, cache_min_bytes=1000)
+        big = fill(2.0, 50_000)                                   # 400 KB, shared by every task
+        other = fill(3.0, 40_000)
+        n = 24
+        before = Dagger.delegation_cache_stats()
+        tasks = [Dagger.@spawn lend=true deleg_sum_busy(chunk, big, i, 0.06) for i in 1:n]
+        @test fetch.(tasks) == [100_000.0 + i for i in 1:n]
+        Dagger.barrier(; comm)
+        after = Dagger.delegation_cache_stats()
+        puts = deleg_total([after.puts - before.puts]); hits = deleg_total([after.hits - before.hits])
+        sent = deleg_total([after.bytes_sent - before.bytes_sent]); saved = deleg_total([after.bytes_saved - before.bytes_saved])
+        lent = deleg_total(deleg_counters())[1]
+        if nranks > 1 && lent > 0
+            # one copy per (owner, thief) pair that got a task, the rest as references
+            @test puts[1] >= 1 && puts[1] <= nranks - 1
+            @test hits[1] + puts[1] == lent
+            @test saved[1] >= (lent - puts[1]) * sizeof(big) * 0.99
+            @test sent[1] < lent * sizeof(big) * 0.5            # far less than shipping the array with every task
+        end
+        # a write is invisible to a thief until the cache is cleared; after that tasks see the new data
+        big .= 5.0
+        Dagger.lend_cache_clear!()
+        Dagger.barrier(; comm)
+        tasks2 = [Dagger.@spawn lend=true deleg_sum_busy(chunk, big, i, 0.04) for i in 1:12]
+        @test fetch.(tasks2) == [250_000.0 + i for i in 1:12]
+        # two arguments that do not fit together in the cache: still correct, with evictions
+        Dagger.disable_delegation!()
+        Dagger.enable_delegation!(slots=2, cache_bytes=500_000, cache_min_bytes=1000)
+        Dagger.barrier(; comm)
+        mixed = [Dagger.@spawn(lend=true, deleg_sum_busy(chunk, isodd(i) ? big : other, i, 0.04)) for i in 1:16]
+        @test fetch.(mixed) == [isodd(i) ? 250_000.0 + i : 120_000.0 + i for i in 1:16]
+        # the cap: tasks whose arguments are larger than it are never lent
+        Dagger.disable_delegation!()
+        Dagger.enable_delegation!(slots=2, cache_bytes=0, max_bytes=100_000)
+        Dagger.barrier(; comm)
+        b0 = deleg_counters()
+        capped = [Dagger.@spawn lend=true deleg_sum_busy(chunk, big, i, 0.04) for i in 1:12]
+        @test fetch.(capped) == [250_000.0 + i for i in 1:12]
+        Dagger.barrier(; comm)
+        @test deleg_total(deleg_counters())[1] - deleg_total(b0)[1] == 0
+        small = [Dagger.@spawn lend=true deleg_busy(i, 0.04) for i in 1:12]       # small arguments are still lent
+        @test first.(fetch.(small)) == [i * i for i in 1:12]
+        Dagger.barrier(; comm)
+        Dagger.disable_delegation!()
+        Dagger.enable_delegation!(slots=2)
     end
 
     @testset "shutdown with an open request" begin

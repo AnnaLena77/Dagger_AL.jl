@@ -508,7 +508,7 @@ reset_elision_stats!() = reset_elision_stats!(current_acceleration())
 reset_elision_stats!(::Acceleration) = nothing
 
 """
-    enable_delegation!(; slots=max(Threads.nthreads(:default) - 1, 1))
+    enable_delegation!(; slots=max(Threads.nthreads(:default) - 1, 1), cache_bytes=0, cache_min_bytes=64 << 10, max_bytes=typemax(Int))
 
 (MPI) Let tasks spawned with `lend=true` have their execution lent to idle ranks. Collective: every
 rank must call it at the same point, before the first lendable task (it creates a communicator for
@@ -517,9 +517,36 @@ tasks wait in a queue from which an idle rank may take them. The default leaves 
 free: the lending service, the broadcast relay and the thread that plans tasks need one, and a rank
 whose threads all run kernels that never yield cannot answer a request until one finishes. Nothing changes for tasks that do not
 set `lend=true`. Other accelerations do not support it.
+
+A lent task ships all its arguments, as serialized values, every time. Two optional keywords keep that in check for large
+arguments. `cache_bytes > 0` turns on an argument cache of that many bytes per (owner, thief) pair: an argument of at least
+`cache_min_bytes` travels once and later tasks of the same owner send a reference to it (the tiles of a step share one tree
+and one LET: they move once per thief, not once per tile; see [`delegation_cache_stats`](@ref)). **The cache is keyed by the
+identity of the object on the owner, so a cached argument must not be written while lendable tasks run** (the thief's copy
+is not updated); call [`lend_cache_clear!`](@ref) after writing one. `max_bytes` refuses to lend a task whose arguments the
+thief does not hold yet add up to more than that many bytes (such a task runs on its own rank).
 """
 enable_delegation!(; kwargs...) = enable_delegation!(current_acceleration(); kwargs...)
 enable_delegation!(::Acceleration; kwargs...) = error("task delegation is only supported by the MPI acceleration")
+
+"""
+    delegation_cache_stats() -> NamedTuple or nothing
+
+Counters of the argument cache of [`enable_delegation!`](@ref) on this process: `hits` (arguments sent as references),
+`puts` (arguments shipped to be kept), `bytes_sent`, `bytes_saved` (bytes a reference stood for), `evicted`, and `refused_by_cap`.
+"""
+delegation_cache_stats() = delegation_cache_stats(current_acceleration())
+delegation_cache_stats(::Acceleration) = nothing
+
+"""
+    lend_cache_clear!()
+
+Forget what the thieves hold of this process's lent arguments (not collective): the next lent task ships its large arguments
+again. Call it after writing an argument that lendable tasks use, because the cache is keyed by the identity of the object
+(see the `cache_bytes` keyword of [`enable_delegation!`](@ref)).
+"""
+lend_cache_clear!() = lend_cache_clear!(current_acceleration())
+lend_cache_clear!(::Acceleration) = nothing
 
 "Undo [`enable_delegation!`](@ref) (collective as well)."
 disable_delegation!() = disable_delegation!(current_acceleration())
