@@ -570,6 +570,17 @@ const ELIDE_FOREIGN_TASKS = Ref{Bool}(false) # set from the environment in `__in
 elide_foreign_tasks!(on::Bool=true) = (ELIDE_FOREIGN_TASKS[] = on)
 
 """
+    ELIDE_DATADEPS_TASKS
+
+Off by default (`JULIA_DAGGER_ELIDE_DATADEPS=1`; implies `ELIDE_FOREIGN_TASKS`). Also lets a rank skip the tasks of a
+Datadeps region that it does not run: the ones that carry a tag and syncdeps. Such a task takes the failure-only status
+path of `ELIDE_FOREIGN_TASKS` (the owner reports only failures, nobody waits for success), so a failing task still reaches
+every rank (`test/mpi/elide.jl`, "Datadeps elision"). Like all elision it needs uniformity checks off. Cholesky 8192/256,
+4 ranks x 16 threads on one node: about -10 % (1.89-1.96 -> 1.69-1.72 s); no effect on tiny tiles.
+"""
+const ELIDE_DATADEPS_TASKS = Ref{Bool}(false)
+
+"""
     FREE_MPI_THREADS
 
 On by default since 2026-10-26 (`Dagger.free_mpi_threads!(false)`, or `JULIA_DAGGER_FREE_MPI_THREADS=0` at startup, turns it off).

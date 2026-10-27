@@ -3053,12 +3053,12 @@ end
 # waits do not know about failures that arrive this way).
 mpi_failure_only(::Nothing) = false
 function mpi_failure_only(opts::Options)
-    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && opts.tag === nothing || return false
+    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && (opts.tag === nothing || Dagger.ELIDE_DATADEPS_TASKS[]) || return false
     return mpi_failure_only(opts, mpi_scope_processor(opts))
 end
 # With the task's processor already worked out (`elide_task!` needs it for other things too)
 function mpi_failure_only(opts::Options, proc::Union{Nothing,MPIProcessor})
-    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && opts.tag === nothing || return false
+    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && (opts.tag === nothing || Dagger.ELIDE_DATADEPS_TASKS[]) || return false
     return proc !== nothing && (proc.comm == MPI.COMM_WORLD || mpi_is_group(proc.comm))
 end
 
@@ -3281,7 +3281,8 @@ function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     task.owner = proc.rank
     local_rank = MPI.Comm_rank(proc.comm)
     proc.rank == local_rank && return elide_no(E_OWN_TASK)
-    (opts.syncdeps === nothing || isempty(opts.syncdeps)) || return elide_no(E_SYNCDEPS_OR_RESTORE)
+    (opts.syncdeps === nothing || isempty(opts.syncdeps) || (Dagger.ELIDE_DATADEPS_TASKS[] && opts.tag !== nothing)) ||
+        return elide_no(E_SYNCDEPS_OR_RESTORE)
     opts.restore === nothing || return elide_no(E_SYNCDEPS_OR_RESTORE)
     T = task.metadata.return_type
     (isconcretetype(T) && T !== Union{}) || return elide_no(E_RETURN_TYPE_NOT_CONCRETE)

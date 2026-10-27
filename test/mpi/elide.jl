@@ -232,9 +232,9 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             t = Dagger.@spawn scope=pinned(nranks-1) elide_inc(x)
             @test (t.stub !== nothing) == (rank != 0 && rank != nranks - 1)
             @test fetch(t) == 11
-            # a tagged task keeps the status broadcast
+            # a tagged task keeps the status broadcast (unless `JULIA_DAGGER_ELIDE_DATADEPS` opts Datadeps tasks in)
             v = Dagger.@spawn scope=pinned(0) tag=UInt32(12345) elide_inc(1)
-            @test v.stub === nothing
+            @test (v.stub !== nothing) == (Dagger.ELIDE_DATADEPS_TASKS[] && rank != 0)
             @test fetch(v) == 2
         end
 
@@ -269,3 +269,49 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
     end
     MPI.Barrier(comm)
 end
+
+# Datadeps elision (experimental, `Dagger.ELIDE_DATADEPS_TASKS`): a rank skips the tasks of a Datadeps region that it does not run.
+# Same results as without, tasks really elided, and a failing task still reaches every rank instead of hanging one.
+dd_inc!(X) = (X .+= 1; nothing)
+dd_boom!(X) = error("dd boom")
+@testset "Datadeps elision" begin
+    if nranks > 1
+        old = Dagger.ELIDE_DATADEPS_TASKS[]
+        Dagger.check_uniformity!(false)
+        Dagger.elide_foreign_tasks!(true)
+        Dagger.ELIDE_DATADEPS_TASKS[] = true
+        try
+            Dagger.reset_elision_stats!()
+            nb = 4
+            A = zeros(Blocks(4, 4), Float64, 4nb, 4nb)
+            copyto!(A, ones(4nb, 4nb))
+            Dagger.spawn_datadeps() do
+                for i in 1:nb, j in 1:nb
+                    Dagger.@spawn dd_inc!(InOut(A.chunks[i, j]))
+                end
+                for _ in 1:3
+                    Dagger.@spawn dd_inc!(InOut(A.chunks[1, 1]))
+                end
+            end
+            expected = fill(2.0, 4nb, 4nb); expected[1:4, 1:4] .+= 3
+            @test collect(A) == expected
+            @test Dagger.elision_stats().elided > 0
+            # a failing task of the region: every rank gets an error, none waits for ever
+            B = zeros(Blocks(4, 4), Float64, 4nb, 4nb)
+            copyto!(B, ones(4nb, 4nb))
+            @test_throws Exception Dagger.spawn_datadeps() do
+                for i in 1:nb, j in 1:nb
+                    Dagger.@spawn dd_inc!(InOut(B.chunks[i, j]))
+                end
+                Dagger.@spawn dd_boom!(InOut(B.chunks[2, 2]))
+                Dagger.@spawn dd_inc!(InOut(B.chunks[2, 2]))
+            end
+        finally
+            Dagger.ELIDE_DATADEPS_TASKS[] = old
+            Dagger.elide_foreign_tasks!(false)
+            Dagger.check_uniformity!(true)
+        end
+        MPI.Barrier(comm)
+    end
+end
+
