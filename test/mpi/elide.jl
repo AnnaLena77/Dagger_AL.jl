@@ -234,7 +234,7 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             @test fetch(t) == 11
             # a tagged task keeps the status broadcast (unless `JULIA_DAGGER_ELIDE_DATADEPS` opts Datadeps tasks in)
             v = Dagger.@spawn scope=pinned(0) tag=UInt32(12345) elide_inc(1)
-            @test (v.stub === nothing) == !Dagger.ELIDE_DATADEPS_TASKS[]
+            @test (v.stub !== nothing) == (Dagger.ELIDE_DATADEPS_TASKS[] && rank != 0)
             @test fetch(v) == 2
         end
 
