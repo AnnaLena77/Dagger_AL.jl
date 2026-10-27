@@ -32,20 +32,22 @@
         @test c[] == 200
     end
     @testset "task arguments: the loop waits for DTasks and chunks" begin
-        # `f(i, args...)`; the first argument is produced by a slow task, so the loop can only start after it
-        slow_vec(n) = (sleep(0.3); collect(1:n))
+        # `f(i, args...)`; the first argument is produced by a task that waits for `gate`, so no worker can start before it
+        gate = Base.Event()
+        hold_range(g, n) = (wait(g); collect(1:n))
         scale(i, v, w, out) = (out[i] = v[i] * w; nothing)
         n = 400
         out = zeros(Int, n)
-        v = Dagger.@spawn slow_vec(n)                      # a DTask argument
-        w = Dagger.tochunk(3)                              # a Chunk argument
-        t0 = time()
-        tasks = Dagger.dynamic_for_async(scale, n, v, w, out; workers=2)
-        @test time() - t0 < 0.25                           # returned at once: the caller did not wait for `v`
+        v = Dagger.@spawn hold_range(gate, n)               # a DTask argument
+        w = Dagger.tochunk(3)                               # a Chunk argument
+        tasks = Dagger.dynamic_for_async(scale, n, v, w, out; workers=2)   # returns without waiting for `v`
+        sleep(0.3)
+        @test !any(istaskdone, tasks) && all(==(0), out)    # nothing ran: the workers are waiting for `v`
+        notify(gate)
         foreach(fetch, tasks)
         @test out == 3 .* (1:n)
         out2 = zeros(Int, n)
-        Dagger.dynamic_for(scale, n, v, 5, out2)           # blocking form, plain value argument
+        Dagger.dynamic_for(scale, n, v, 5, out2)            # blocking form, plain value argument
         @test out2 == 5 .* (1:n)
     end
     @testset "called from inside tasks, with every thread busy" begin
