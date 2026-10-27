@@ -229,7 +229,9 @@ deleg_total(v) = Dagger.allreduce_value(+, v; comm)
             @test puts[1] >= 1 && puts[1] <= nranks - 1
             @test hits[1] + puts[1] == lent
             @test saved[1] >= (lent - puts[1]) * sizeof(big) * 0.99
-            @test sent[1] < lent * sizeof(big) * 0.5            # far less than shipping the array with every task
+            # the array travelled once per put (plus the small rest of each task), not with every task
+            @test sent[1] <= puts[1] * sizeof(big) * 1.05 + 10_000 * lent
+            @test sent[1] < lent * sizeof(big) || lent <= puts[1]  # fewer bytes than shipping it with every task, once a thief took two
         end
         # a write is invisible to a thief until the cache is cleared; after that tasks see the new data
         big .= 5.0
