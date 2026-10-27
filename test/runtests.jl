@@ -25,6 +25,7 @@ tests = [
     ("Two-choices Placement", "two-choices.jl"),
     ("Local Fast Path", "local-fastpath.jl"),
     ("Dynamic Loop", "bulk.jl"),
+    ("NUMA Map", "numa.jl"),
     ("Processor Grids", "procgrid.jl"),
     ("Memory Spaces", "memory-spaces.jl"),
     ("Interval Tree", "interval_tree.jl"),

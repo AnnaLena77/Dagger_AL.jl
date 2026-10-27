@@ -101,6 +101,7 @@ include("utils/caching.jl")
 include("sch/Sch.jl"); using .Sch
 include("tochunk.jl")
 include("bulk.jl")
+include("numa.jl")
 
 # Data dependency task queue
 include("datadeps/aliasing.jl")
