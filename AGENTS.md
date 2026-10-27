@@ -1405,3 +1405,26 @@ lesson.
    info; a plain tile chunk is ~170 us. Many fine tasks over one buffer need views created once and reused,
    or one chunk per tile.
 
+122. **A blocking MPI collective in the driver can deadlock the whole rank, and which build you test
+   on does not matter when the timing does.** The full MPI suite called `MPI.Allgather` / `MPI.Barrier`
+   61 times between Dagger operations: harmless on one node, a stall across two (every build, the tagged
+   one too, from one evening to the next with no code change): ranks parked in `MPI_Allgather` at 100 %
+   CPU, the broadcast relay (bound to the driver's thread) unable to forward what the one rank still in
+   Dagger waited for, then `Hit hang on send` killing the relay after 120 s (900 s changed nothing: a
+   real cycle, not slowness). Diagnose a hung SPMD run with a watchdog on the interactive pool
+   (`jl_print_task_backtraces`) *and* SIGTERM on the ranks that print nothing: Julia then prints every
+   thread's native stack, and ranks whose watchdog never fires are the frozen ones. Fix: relay migratable
+   (`set_task_migratable!`, lesson 98's other half) and cooperative `Dagger.allgather_value` / `barrier`.
+   Do not call blocking MPI from the driver while tasks are in flight. Also: a hang that appears with
+   the old build too is not your last commit: run the validated build on the same nodes before bisecting.
+
+123. **Under MPI nothing holds a ready task back, so one task per tile floods the rank.** Every MPI
+   task has occupancy 0: all ready tasks start at once as Julia tasks, first come first served. 250
+   tiles of 30 ms on 8 threads put a small urgent task (the export other ranks wait for) behind ~0.9 s
+   of backlog; the application saw one task per tile 60-80 % slower under MPI while the same tasks in
+   shared memory (occupancy 1: one per processor, queued) were as fast as a worker pool. Probe it with
+   `bench/tiles_latency.jl` (urgent latency 32-211 ms against 0-1 ms). The rank gate fixes it only
+   with priorities set (`priority=1` on the urgent tasks) and a reserve of at least one slot: reserve 0
+   leaves no thread for the scheduler's own `do_task` of the urgent task (60-212 ms). Test the
+   latency before the first `@test` of a testset: it compiles for ~80 ms inside the timing window.
+
