@@ -2,20 +2,25 @@
 
 # Hands out index chunks of `1:n` from the shared counter `next` until none are left
 function _dynamic_for_worker(next::Threads.Atomic{Int}, f, n::Int, chunk::Int, args...)
+    taken = 0
     while true
         lo = Threads.atomic_add!(next, chunk)
         lo >= n && break
-        for i in (lo + 1):min(lo + chunk, n)
+        hi = min(lo + chunk, n)
+        for i in (lo + 1):hi
             f(i, args...)
         end
+        taken += hi - lo
     end
-    return nothing
+    return taken
 end
 
 """
     dynamic_for_async(f, n::Integer, args...; chunk=nothing, workers=Threads.nthreads(), scope=nothing) -> Vector{DTask}
 
 Start `f(i, args...)` for every `i` in `1:n` as `workers` self-scheduling tasks and return them.
+The result of each task is the number of indices that worker took, so `fetch.(tasks)` shows how
+the loop was balanced (the entries add up to `n`).
 `args` are ordinary task arguments: a `DTask` or a `Chunk` among them is waited for and
 resolved before any worker starts, exactly as for `Dagger.@spawn`, so the loop starts when
 its inputs exist and the caller need not wait for them (`f(i)` when there are none).
@@ -45,12 +50,11 @@ end
     dynamic_for(f, n::Integer, args...; kwargs...)
 
 Run `f(i, args...)` for every `i` in `1:n` and wait for all of it; rethrows the first failure.
-See [`dynamic_for_async`](@ref). Called from inside a task, this blocks that task until the
+Returns the number of indices each worker took (see [`dynamic_for_async`](@ref)), whose sum is `n`. Called from inside a task, this blocks that task until the
 workers are done and the task keeps its processor meanwhile; from a task, prefer
 `dynamic_for_async` and hand the returned tasks to a follow-up task as arguments.
 """
 function dynamic_for(f, n::Integer, args...; kwargs...)
     tasks = dynamic_for_async(f, n, args...; kwargs...)
-    foreach(fetch, tasks)
-    return nothing
+    return Int[fetch(t) for t in tasks]
 end

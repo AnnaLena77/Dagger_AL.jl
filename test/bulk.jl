@@ -18,6 +18,12 @@
     @testset "failure propagates" begin
         @test_throws Exception Dagger.dynamic_for(i -> i == 7 ? error("boom") : nothing, 100)
     end
+    @testset "per-worker counts" begin
+        counts = Dagger.dynamic_for(i -> nothing, 1000; workers=3, chunk=7)
+        @test length(counts) == 3 && sum(counts) == 1000
+        @test sum(fetch.(Dagger.dynamic_for_async(i -> nothing, 55; workers=2))) == 55
+        @test sum(Dagger.dynamic_for(i -> nothing, 0)) == 0     # no iterations: nothing taken
+    end
     @testset "async form returns the workers" begin
         c = Threads.Atomic{Int}(0)
         tasks = Dagger.dynamic_for_async(i -> Threads.atomic_add!(c, 1), 200; workers=2)
