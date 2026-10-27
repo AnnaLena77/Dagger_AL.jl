@@ -116,14 +116,14 @@ function deleg_counters()
     return [st.lent, st.stolen, st.local_, st.returned, st.failed]
 end
 # sum of a counter vector over the ranks (no tasks are in flight when this is called)
-deleg_total(v) = MPI.Allreduce(v, +, comm)
+deleg_total(v) = Dagger.allreduce_value(+, v; comm)
 
 @testset "Delegation: across ranks" begin
     @test Dagger.delegation_stats() === nothing          # nothing is enabled by default
     # lend=true without delegation enabled is plain execution
     @test fetch(Dagger.@spawn lend=true deleg_plain(1)) == 2
     @test Dagger.delegation_stats() === nothing
-    MPI.Barrier(comm)
+    Dagger.barrier(; comm)
 
     Dagger.enable_delegation!(slots=2)
     @test Dagger.delegation_stats() == (lent=0, failed=0, returned=0, stolen=0, local_=0)
@@ -137,7 +137,7 @@ deleg_total(v) = MPI.Allreduce(v, +, comm)
         res = fetch.(tasks)
         @test first.(res) == [i * i for i in 1:n]
         @test all(r -> 0 <= last(r) < nranks, res)
-        MPI.Barrier(comm)
+        Dagger.barrier(; comm)
         c = deleg_counters()
         tot = deleg_total(c)
         # everything lendable ran somewhere, either at home or on a thief: nothing twice, nothing lost
@@ -152,7 +152,7 @@ deleg_total(v) = MPI.Allreduce(v, +, comm)
             tasks = [Dagger.@spawn lend=true deleg_chunk_busy(chunk, i, 0.08) for i in 1:n]
             res = fetch.(tasks)
             @test first.(res) == [i * i for i in 1:n]
-            MPI.Barrier(comm)
+            Dagger.barrier(; comm)
             after = deleg_total(deleg_counters())
             @test all(fetch(t; raw=true).handle.rank == owner_rank for t in tasks)   # the owner never changed
             @test after[1] - before[1] > 0                  # some were lent
@@ -180,7 +180,7 @@ deleg_total(v) = MPI.Allreduce(v, +, comm)
             @test occursin("boom $i from rank", msgs[end])
         end
         # the failures that were lent reached the owner as failures, not as a hang
-        MPI.Barrier(comm)
+        Dagger.barrier(; comm)
         after = deleg_total(deleg_counters())
         @test after[5] - before[5] <= after[1] - before[1]
         # and the runtime is still usable
@@ -190,7 +190,7 @@ deleg_total(v) = MPI.Allreduce(v, +, comm)
     @testset "mixed pinned and free tasks" begin
         cpus = filter(p -> p.innerProc isa Dagger.ThreadProc, mpi_procs())
         target = last(cpus)
-        MPI.Barrier(comm)
+        Dagger.barrier(; comm)
         before = deleg_counters()
         pinned = [Dagger.@spawn(scope=Dagger.ExactScope(target), lend=true, deleg_where(i)) for i in 1:8]
         plain = [Dagger.@spawn deleg_plain(i) for i in 1:16]
@@ -200,7 +200,7 @@ deleg_total(v) = MPI.Allreduce(v, +, comm)
             @test r == (target.rank, target.innerProc.tid, i)
         end
         @test fetch.(plain) == [i + 1 for i in 1:16]
-        MPI.Barrier(comm)
+        Dagger.barrier(; comm)
         # neither pinned nor plain tasks pass through the pool: enabling delegation changes nothing for them
         @test deleg_counters() == before
         free = [Dagger.@spawn lend=true deleg_busy(i, 0.03) for i in 1:16]
@@ -210,7 +210,7 @@ deleg_total(v) = MPI.Allreduce(v, +, comm)
     @testset "shutdown with an open request" begin
         # every idle rank holds a request at its peers; stopping must not hang or fail anything
         sleep(0.2)
-        MPI.Barrier(comm)
+        Dagger.barrier(; comm)
         Dagger.disable_delegation!()
         @test Dagger.delegation_stats() === nothing
         @test fetch(Dagger.@spawn lend=true deleg_plain(41)) == 42
@@ -218,7 +218,7 @@ deleg_total(v) = MPI.Allreduce(v, +, comm)
         Dagger.enable_delegation!(slots=2)
         res = fetch.([Dagger.@spawn lend=true deleg_busy(i, 0.02) for i in 1:8])
         @test first.(res) == [i * i for i in 1:8]
-        MPI.Barrier(comm)
+        Dagger.barrier(; comm)
         Dagger.disable_delegation!()
     end
 end

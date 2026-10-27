@@ -150,6 +150,40 @@ Pass `T` when the code that uses the result needs a fixed type, e.g. `allgather(
 allgather(tasks::AbstractVector, ::Type{T}) where {T} = convert(Vector{T}, allgather(tasks))
 
 """
+    allgather_value(x; comm) -> Vector
+
+SPMD collective for a plain value: every process contributes `x` (anything that serializes) and gets the vector of all
+contributions in rank order. Under MPI it is a cooperative exchange: **no thread is parked inside MPI**. That is the
+difference to `MPI.Allgather` from the driver, which holds an OS thread in a C call that is not a GC safepoint: a
+collection triggered by another thread then waits for it for ever, freezing the whole rank (its relay forwards no
+broadcast, so a peer that waits for one never reaches the collective): a deadlock across nodes, where such calls take
+longer than in shared memory (the full MPI suite hung on two nodes because of it). `comm` selects another
+communicator than the acceleration's. Elsewhere it is `[x]`.
+"""
+allgather_value(x; kwargs...) = allgather_value(current_acceleration(), x; kwargs...)
+allgather_value(::Acceleration, x; kwargs...) = Any[x]
+
+"""
+    allreduce_value(op, x; init, comm) -> value
+
+[`allgather_value`](@ref) then a fold with `op` in rank order on every process (identical bits everywhere, whatever the
+arrival order), cooperatively. `allreduce_value(+, x)` is the sum of `x` over the processes.
+"""
+function allreduce_value(op, x; init=nothing, kwargs...)
+    vals = allgather_value(x; kwargs...)
+    return init === nothing ? reduce(op, vals) : reduce(op, vals; init)
+end
+
+"""
+    barrier(; comm)
+
+SPMD barrier that waits cooperatively (a non-blocking `MPI_Ibarrier` polled with `yield`): no thread is parked inside MPI
+(see [`allgather_value`](@ref)). A no-op without MPI.
+"""
+barrier(; kwargs...) = barrier(current_acceleration(); kwargs...)
+barrier(::Acceleration; kwargs...) = nothing
+
+"""
     allreduce(op, tasks; init) -> value
 
 SPMD collective: [`allgather`](@ref) the values of `tasks` and fold them with `op` **in list order**,

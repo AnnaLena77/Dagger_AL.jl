@@ -37,7 +37,7 @@ end
         for c in (cat, :slot_window_ainfos)
             c in Dagger.OPCOUNTER_CATEGORIES || push!(Dagger.OPCOUNTER_CATEGORIES, c)
         end
-        sent(c) = MPI.Allreduce(Dagger.opcounter(c === cat ? mpiext : Dagger, c), +, comm)
+        sent(c) = Dagger.allreduce_value(+, Dagger.opcounter(c === cat ? mpiext : Dagger, c); comm)
         slot_region(1, 2)   # warm up
         slot_region(32, 2)
         before1 = sent(cat)
@@ -54,4 +54,4 @@ end
         @test res32 == expected
     end
 end
-MPI.Barrier(comm)
+Dagger.barrier(; comm)

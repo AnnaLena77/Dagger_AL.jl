@@ -16,16 +16,16 @@ free_where() = Threads.threadid()
                 [Dagger.@spawn(free_quick(i)) for i in 1:16]
             end)
             foreach(fetch, [Dagger.@spawn(scope=Dagger.ExactScope(p), hog_busy(0.01)) for p in rank0])
-            MPI.Barrier(comm)
+            Dagger.barrier(; comm)
             # Occupy every thread of rank 0 but the first with a pinned (so bound) task that never yields
             hogs = [Dagger.@spawn(scope=Dagger.ExactScope(p), hog_busy(1.5)) for p in rank0[2:end]]
             sleep(0.3)
-            MPI.Barrier(comm)
+            Dagger.barrier(; comm)
             # warm up the stamping variant as well
             foreach(fetch, Dagger.with_options(; scope=Dagger.scope(mpi_rank=0)) do
                 [Dagger.@spawn(free_stamp(i)) for i in 1:16]
             end)
-            MPI.Barrier(comm)
+            Dagger.barrier(; comm)
             t0 = time()
             # Scope = the whole rank, 16 tasks: the scheduler names every thread in turn, busy ones included
             tasks = Dagger.with_options(; scope=Dagger.scope(mpi_rank=0)) do
@@ -47,7 +47,7 @@ free_where() = Threads.threadid()
             Dagger.free_mpi_threads!(false)
         end
     end
-    MPI.Barrier(comm)
+    Dagger.barrier(; comm)
 end
 
 # The task of an MPI processor starts pinned to the thread of its inner processor, so
@@ -90,5 +90,5 @@ end
     else
         fetch(Dagger.@spawn(scope=Dagger.ExactScope(first(filter(p -> p.rank == 0, cpus))), free_where()))
     end
-    MPI.Barrier(comm)
+    Dagger.barrier(; comm)
 end

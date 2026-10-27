@@ -33,7 +33,7 @@ group_plus!(X, c) = (X .+= c; nothing)
         @test vals == [i + 1 for i in 1:n]
         t = Dagger.@spawn scope=pinned(nranks-1) group_inc(1)
         @test fetch(t) == 2
-        @test allequal(MPI.Allgather(Int(t.uid), comm))
+        @test allequal(Dagger.allgather_value(Int(t.uid); comm))
         @test Int(t.uid) < MPI.tag_ub()
         # the task ids of the group are above the tag range and distinct from the other group's
         gt = Dagger.with_group(stage1) do
@@ -42,7 +42,7 @@ group_plus!(X, c) = (X .+= c; nothing)
         @test Int(gt.uid) >= MPIExt.MPI_GROUP_ID_BASE
         @test fetch(gt) == 2
         # members of one group agree on the ids; two groups never use the same id in one process
-        @test allequal(MPI.Allgather(Int(gt.uid), stage1))
+        @test allequal(Dagger.allgather_value(Int(gt.uid); comm=stage1))
         gt2 = Dagger.with_group(stage2) do
             Dagger.@spawn scope=gscope(stage2, 0) group_inc(1)
         end
@@ -105,7 +105,7 @@ group_plus!(X, c) = (X .+= c; nothing)
         end
         t = Dagger.@spawn scope=pinned(nranks-1) group_inc(5)
         @test fetch(t) == 6
-        @test allequal(MPI.Allgather(Int(t.uid), comm))
+        @test allequal(Dagger.allgather_value(Int(t.uid); comm))
     end
 
     # A Datadeps region of a group: the array is owned by the group's rank 0 (the owner of the region's data), tasks run on
@@ -126,7 +126,7 @@ group_plus!(X, c) = (X .+= c; nothing)
         g2rank != 0 && @test A == fill(1.0, 6)           # the other members keep their own copy, as in the world
         t = Dagger.@spawn scope=pinned(nranks-1) group_inc(1)
         @test fetch(t) == 2
-        @test allequal(MPI.Allgather(Int(t.uid), comm))
+        @test allequal(Dagger.allgather_value(Int(t.uid); comm))
         # and a region of the world still works
         W = fill(1.0, 4)
         Dagger.spawn_datadeps() do
@@ -152,7 +152,7 @@ group_plus!(X, c) = (X .+= c; nothing)
                 @test [fetch(t) for t in ts] == [i + 1 for i in 1:n]
                 # every member of the group gets all values with one exchange inside the group
                 @test Dagger.with_group(() -> Dagger.allgather(ts), gall) == [i + 1 for i in 1:n]
-                @test allequal(MPI.Allgather(Int(ts[end].uid), gall))
+                @test allequal(Dagger.allgather_value(Int(ts[end].uid); comm=gall))
                 st = Dagger.elision_stats()
                 @test st.elided == n - count(i -> mod(i, nranks) == rank, 1:n)
                 @test st.own_task == count(i -> mod(i, nranks) == rank, 1:n)
@@ -165,11 +165,11 @@ group_plus!(X, c) = (X .+= c; nothing)
                     Dagger.@spawn scope=gscope(gall, 0) group_inc(41)
                 end
                 @test fetch(t2) == 42
-                @test allequal(MPI.Allgather(Int(t2.uid), gall))
+                @test allequal(Dagger.allgather_value(Int(t2.uid); comm=gall))
                 # the world did not notice any of it
                 t = Dagger.@spawn scope=pinned(nranks-1) group_inc(7)
                 @test fetch(t) == 8
-                @test allequal(MPI.Allgather(Int(t.uid), comm))
+                @test allequal(Dagger.allgather_value(Int(t.uid); comm))
                 Dagger.free_group!(gall)
             finally
                 Dagger.elide_foreign_tasks!(false)
@@ -180,5 +180,5 @@ group_plus!(X, c) = (X .+= c; nothing)
 
     Dagger.free_group!(stage1)
     Dagger.free_group!(stage2)
-    MPI.Barrier(comm)
+    Dagger.barrier(; comm)
 end

@@ -37,7 +37,7 @@ local_inc(x::Int) = x + 1
         # tasks of the world afterwards: ids, tags and planning agree on every rank
         t = Dagger.@spawn scope=pinned(nranks-1) local_inc(1)
         @test fetch(t) == 2
-        @test allequal(MPI.Allgather(Int(t.uid), comm))
+        @test allequal(Dagger.allgather_value(Int(t.uid); comm))
         # a world id is still below the tag range, a local one above it
         @test Int(t.uid) < MPI.tag_ub()
         lt = Dagger.with_rank_local() do
@@ -61,12 +61,12 @@ local_inc(x::Int) = x + 1
         @test length(chunks) == nranks
         @test all(c -> c.handle isa MPIExt.MPIRef && c.handle.comm == MPI.COMM_WORLD, chunks)
         @test [c.handle.rank for c in chunks] == collect(0:nranks-1)
-        @test allequal(MPI.Allgather(hash(map(c -> c.handle.id, chunks)), comm))
+        @test allequal(Dagger.allgather_value(hash(map(c -> c.handle.id, chunks)); comm))
         # a shared task on each rank reads its rank's chunk; then the shared work continues in agreement
         sums = [fetch(Dagger.@spawn(scope=pinned(r), local_sum(chunks[r+1]))) for r in 0:nranks-1]
         @test sums == [10.0 * (r + 1) for r in 0:nranks-1]
         t = Dagger.@spawn scope=pinned(0) local_inc(1)
-        @test allequal(MPI.Allgather(Int(t.uid), comm))
+        @test allequal(Dagger.allgather_value(Int(t.uid); comm))
         # a shared task that combines chunks of different ranks (data moves between ranks)
         both = fetch(Dagger.@spawn(scope=pinned(0), local_sum2(chunks[nranks], chunks[1])))
         @test both == 10.0 * nranks + 10.0
@@ -91,9 +91,9 @@ local_inc(x::Int) = x + 1
         # the world is unaffected and still agrees
         t = Dagger.@spawn scope=pinned(nranks-1) local_inc(5)
         @test fetch(t) == 6
-        @test allequal(MPI.Allgather(Int(t.uid), comm))
+        @test allequal(Dagger.allgather_value(Int(t.uid); comm))
     end
-    MPI.Barrier(comm)
+    Dagger.barrier(; comm)
 end
 
 # Datadeps regions inside a rank-local graph: the planner of a graph on a one-rank communicator
@@ -133,7 +133,7 @@ local_plus!(X, c) = (X .+= c; nothing)
     @testset "the world still agrees afterwards" begin
         t = Dagger.@spawn scope=pinned(nranks-1) local_inc(7)
         @test fetch(t) == 8
-        @test allequal(MPI.Allgather(Int(t.uid), comm))
+        @test allequal(Dagger.allgather_value(Int(t.uid); comm))
         # and Datadeps of the world still works
         W = fill(1.0, 4)
         Dagger.spawn_datadeps() do
@@ -141,5 +141,5 @@ local_plus!(X, c) = (X .+= c; nothing)
         end
         rank == 0 && @test W == fill(2.0, 4)
     end
-    MPI.Barrier(comm)
+    Dagger.barrier(; comm)
 end

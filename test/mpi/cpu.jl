@@ -142,7 +142,7 @@ end
     @test Dagger.current_acceleration() isa MPIExt.MPIAcceleration
     probe = rand(UInt64)
     @test Dagger.check_uniform(probe)
-    MPI.Barrier(comm)
+    Dagger.barrier(; comm)
 end
 
 include("spawn.jl")
@@ -869,5 +869,5 @@ end
 
 end # @testset "MPI"
 
-MPI.Barrier(comm)
+Dagger.barrier(; comm)
 Core.println("[$rank] MPI suite OK")

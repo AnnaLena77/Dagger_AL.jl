@@ -98,18 +98,18 @@ reftid_size() = lock(d -> length(d), MPIExt._MPIREF_TID)
 @testset "Ref-id table does not grow with plain tasks" begin
     cpus = filter(p -> p.innerProc isa Dagger.ThreadProc, mpi_procs())
     foreach(fetch, [Dagger.@spawn(mpi_spawn_value_fast(i)) for i in 1:8])   # warm up
-    MPI.Barrier(comm)
+    Dagger.barrier(; comm)
     before = reftid_size()
     # unscoped, pinned to every rank in turn, and a body that may throw
     foreach(wait, [Dagger.@spawn(mpi_spawn_value_fast(i)) for i in 1:100])
     foreach(wait, [Dagger.@spawn(scope=Dagger.ExactScope(cpus[mod1(i, length(cpus))]), mpi_spawn_value_fast(i)) for i in 1:100])
     foreach(wait, [Dagger.@spawn(mpi_spawn_checked(i)) for i in 1:100])
-    MPI.Barrier(comm)
+    Dagger.barrier(; comm)
     # Nothing is left behind by 300 tasks (a few entries may belong to tasks still finishing)
     @test reftid_size() - before < 20
     # and ids are still uniform afterwards
     t = Dagger.@spawn mpi_spawn_value_fast(1)
     @test fetch(t) == 42
-    @test allequal(MPI.Allgather(Int(t.uid), comm))
+    @test allequal(Dagger.allgather_value(Int(t.uid); comm))
 end
 Dagger.free_mpi_threads!(SPAWN_FREE_BEFORE)

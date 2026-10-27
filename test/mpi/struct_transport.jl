@@ -87,5 +87,5 @@ guard_check(b::GuardedBundle) = b.total == 2.0 * length(b.v)
             end
         end
     end
-    MPI.Barrier(comm)
+    Dagger.barrier(; comm)
 end

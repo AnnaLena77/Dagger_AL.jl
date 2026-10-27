@@ -27,4 +27,4 @@ tid_of!(a::Vector{Float64}) = (a[1] += 1; Threads.threadid())
         end
     end
 end
-MPI.Barrier(comm)
+Dagger.barrier(; comm)

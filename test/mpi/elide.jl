@@ -24,11 +24,11 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
                 @test (t.stub !== nothing) == (rank != target)
                 @test t.owner == target
                 @test fetch(t) == 42
-                @test allequal(MPI.Allgather(Int(t.uid), comm))
+                @test allequal(Dagger.allgather_value(Int(t.uid); comm))
                 # the placeholder and the real chunk agree on type and space
                 chunk = fetch(t; raw=true)
                 @test chunk.chunktype === Int
-                @test allequal(MPI.Allgather(hash((chunk.handle.rank, chunk.handle.id, chunk.chunktype)), comm))
+                @test allequal(Dagger.allgather_value(hash((chunk.handle.rank, chunk.handle.id, chunk.chunktype)); comm))
             end
         end
 
@@ -40,10 +40,10 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
                 @test (t.stub !== nothing) == (rank != target)
                 @test t.owner == target
                 @test fetch(t) == 2
-                @test allequal(MPI.Allgather(Int(t.uid), comm))
+                @test allequal(Dagger.allgather_value(Int(t.uid); comm))
                 chunk = fetch(t; raw=true)
                 @test chunk.handle.rank == target
-                @test allequal(MPI.Allgather(hash((chunk.handle.rank, chunk.handle.id, chunk.chunktype)), comm))
+                @test allequal(Dagger.allgather_value(hash((chunk.handle.rank, chunk.handle.id, chunk.chunktype)); comm))
             end
             # one scope object shared by many tasks (a `with_options` block): the owner spreads them over its threads
             target = nranks - 1
@@ -57,7 +57,7 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             # A spectator's placeholder names the processor the owner ran the task on (BUGS B9:
             # it named a fixed member of the scope, so the ranks disagreed on `chunk.processor`)
             stamped = [(p.rank, p.innerProc.tid) for p in (fetch(t; raw=true).processor for t in tasks)]
-            @test allequal(MPI.Allgather(hash(stamped), comm))
+            @test allequal(Dagger.allgather_value(hash(stamped); comm))
             # a chain across two rank-level scopes, and a failure
             a = Dagger.@spawn scope=Dagger.scope(mpi_rank=0) elide_inc(1)
             b = Dagger.@spawn scope=Dagger.scope(mpi_rank=nranks-1) elide_add(a, 10)
@@ -99,7 +99,7 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             @test fetch.(tasks) == [i + 1 for i in 1:2n]
             @test all(t -> t.owner >= 0, tasks)
             @test all(t -> fetch(t; raw=true).handle.rank == t.owner, tasks)
-            @test all(t -> allequal(MPI.Allgather(Int(t.uid), comm)), tasks[1:4])
+            @test all(t -> allequal(Dagger.allgather_value(Int(t.uid); comm)), tasks[1:4])
             @test count(t -> t.stub !== nothing, tasks) == count(t -> t.owner != rank, tasks)
             @test all(r -> any(t -> t.owner == r, tasks), 0:nranks-1)   # round robin reaches every rank
             # data affinity: a task that reads an MPI chunk runs on the chunk's rank
@@ -138,7 +138,7 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             wait(t)
             @test (t.stub !== nothing) == (rank != target)
             @test fetch(t) == 4
-            @test allequal(MPI.Allgather(Int(t.uid), comm))
+            @test allequal(Dagger.allgather_value(Int(t.uid); comm))
             # ... and when the chunk is also an argument of a task pinned to one processor of that rank
             t2 = Dagger.@spawn scope=pinned(target) elide_len(restricted)
             wait(t2)
@@ -151,7 +151,7 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
                 t3 = Dagger.@spawn scope=Dagger.scope(mpi_rank=target) elide_len(clash)
                 @test t3.stub === nothing
                 @test_throws Exception fetch(t3)
-                @test allequal(MPI.Allgather(Int(t3.uid), comm))
+                @test allequal(Dagger.allgather_value(Int(t3.uid); comm))
             end
         end
 
@@ -164,14 +164,14 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             @test all(>=(0), placed)
             held = [fetch(b; raw=true).handle.rank for b in blocks]
             @test placed == held                              # what was recorded is where the block is
-            @test allequal(MPI.Allgather(hash(placed), comm))
+            @test allequal(Dagger.allgather_value(hash(placed); comm))
             for (i, b) in enumerate(blocks)
                 o = placed[i]
                 t = Dagger.@spawn scope=Dagger.scope(mpi_rank=o) elide_blocksum(b)
                 wait(t)
                 @test (t.stub !== nothing) == (rank != o)     # every other rank elides it
                 @test fetch(t) == 0.0
-                @test allequal(MPI.Allgather(Int(t.uid), comm))
+                @test allequal(Dagger.allgather_value(Int(t.uid); comm))
             end
             if nranks >= 3
                 # on another rank than the block's: the block's rank sends the data (takes part), a third rank elides
@@ -183,7 +183,7 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
                 # every rank that is neither the block's nor the task's elides, not only `third` (4+ ranks)
                 @test (t.stub !== nothing) == (rank != o && rank != other)
                 @test fetch(t) == 0.0
-                @test allequal(MPI.Allgather(Int(t.uid), comm))
+                @test allequal(Dagger.allgather_value(Int(t.uid); comm))
             end
         end
 
@@ -261,13 +261,13 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             y = Dagger.@spawn scope=Dagger.scope(mpi_rank=nranks-1) fill(2.0, 8)
             s = Dagger.@spawn scope=Dagger.scope(mpi_rank=0) sum(y)
             @test fetch(s) == 16.0
-            @test allequal(MPI.Allgather(Int(s.uid), comm))
+            @test allequal(Dagger.allgather_value(Int(s.uid); comm))
         end
     finally
         Dagger.elide_foreign_tasks!(false)
         Dagger.check_uniformity!(true)
     end
-    MPI.Barrier(comm)
+    Dagger.barrier(; comm)
 end
 
 # Datadeps elision (experimental, `Dagger.ELIDE_DATADEPS_TASKS`): a rank skips the tasks of a Datadeps region that it does not run.
@@ -311,7 +311,7 @@ dd_boom!(X) = error("dd boom")
             Dagger.elide_foreign_tasks!(false)
             Dagger.check_uniformity!(true)
         end
-        MPI.Barrier(comm)
+        Dagger.barrier(; comm)
     end
 end
 

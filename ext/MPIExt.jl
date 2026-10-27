@@ -3557,6 +3557,19 @@ function mpi_allgather_blocks_native(comm::MPI.Comm, mine::Vector{UInt8})
     return blocks
 end
 
+# `Dagger.allgather_value`, `Dagger.barrier`: collectives for plain values with the progress rules of this file (no
+# thread parked in MPI; see the docstrings in acceleration.jl)
+function Dagger.allgather_value(accel::MPIAcceleration, x; comm::MPI.Comm=accel.comm)
+    blocks = mpi_allgather_blocks(comm, MPI.serialize(x))
+    return Any[MPI.deserialize(b) for b in blocks]
+end
+function Dagger.barrier(accel::MPIAcceleration; comm::MPI.Comm=accel.comm)
+    MPI.Comm_size(comm) == 1 && return nothing
+    req = MPI.Ibarrier(comm)
+    __wait_for_request(req, comm, MPI.Comm_rank(comm), -1, UInt32(0), "barrier", "collective")
+    return nothing
+end
+
 function Dagger.allgather(accel::MPIAcceleration, tasks::AbstractVector)
     comm = accel.comm
     rank = MPI.Comm_rank(comm)

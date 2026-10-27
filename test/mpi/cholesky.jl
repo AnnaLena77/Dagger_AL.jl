@@ -21,5 +21,5 @@ err = norm(U_dist - C.U) / norm(C.U)
 recon = norm(U_dist' * U_dist - B) / norm(B)
 Core.println("[$rank] chol err=$err recon=$recon")
 @assert err < 1e-12 && recon < 1e-12
-MPI.Barrier(comm)
+Dagger.barrier(; comm)
 Core.println("[$rank] chol OK")

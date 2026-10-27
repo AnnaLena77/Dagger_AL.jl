@@ -348,6 +348,6 @@ end
 
 end # @testset "MPI $(cfg.name) Datadeps"
 
-    MPI.Barrier(comm)
+    Dagger.barrier(; comm)
     Core.println("[$rank] MPI $(cfg.name) suite OK")
 end
