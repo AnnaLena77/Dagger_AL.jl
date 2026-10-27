@@ -16,6 +16,8 @@ rg_maxseen() = rg_max[]
     if nranks > 1 && nthr >= 3
         Dagger.check_uniformity!(false)
         sc = Dagger.scope(mpi_rank=nranks - 1)
+        free_before = Dagger.FREE_MPI_THREADS[]
+        Dagger.free_mpi_threads!(true)           # the gate wraps tasks that run on a free thread (earlier tests leave the switch off)
         try
             Dagger.mpi_rank_gate!(true; cap=nthr, reserve=1)
             # warm up with the same shape (queued tiles, an urgent task): the first call of each path compiles for a while
@@ -42,6 +44,7 @@ rg_maxseen() = rg_max[]
             @test mx >= min(2, nthr - 1)                                   # and the gate did let several run together
         finally
             Dagger.mpi_rank_gate!(false)
+            Dagger.free_mpi_threads!(free_before)
             Dagger.check_uniformity!(true)
         end
     else
