@@ -38,6 +38,35 @@ end
 LendRecord(uid, f, args, kwargs) =
     LendRecord(uid, f, args, kwargs, LEND_QUEUED, false, -1, false, nothing, Base.Event())
 
+# --- The argument cache ------------------------------------------------------------------------------------
+# A lent task ships its arguments, and the tiles of one step share the same large ones (the tree and the LET of a
+# partition). With a cache a large argument travels once per (owner, thief) pair: the owner keeps a model of what each
+# thief holds, sends `put` operations for the arguments the thief lacks and `LendRef`s for the ones it has, and the
+# thief applies the same operations in the same order (messages of one pair are ordered: one communicator, one tag).
+# The cache is keyed by the identity of the argument object on the owner, so **the cached arguments must not be written
+# while lendable tasks run** (the thief's copy is not updated): `Dagger.lend_cache_clear!()` forgets them.
+const LEND_OP_PUT = UInt8(1)
+const LEND_OP_EVICT = UInt8(2)
+const LEND_OP_CLEAR = UInt8(3)
+struct LendRef
+    id::UInt64
+end
+mutable struct LendCacheModel
+    const entries::Dict{UInt,Tuple{UInt64,Int,Any}}    # objectid -> (id, bytes, the object: kept alive so the id stays valid)
+    const order::Vector{UInt}                          # least recently used first
+    bytes::Int
+    next_id::UInt64
+    clear_pending::Bool
+end
+LendCacheModel() = LendCacheModel(Dict{UInt,Tuple{UInt64,Int,Any}}(), UInt[], 0, UInt64(1), false)
+
+lend_cacheable(a) = !isbitstype(typeof(a)) && !(a isa Union{String,Symbol,Function,Type,Module})
+function lend_bytes(a)
+    a isa AbstractArray && isbitstype(eltype(a)) && return sizeof(a)
+    isbitstype(typeof(a)) && return 0
+    return Base.summarysize(a)
+end
+
 mutable struct LendPool
     const lock::ReentrantLock
     capacity::Int
@@ -94,12 +123,13 @@ function lend_pool_try_take!(pool::LendPool)
     end
 end
 
-# Claim the newest queued task that may be lent
-function lend_pool_steal!(pool::LendPool, thief::Int)
+# Claim the newest queued task that may be lent (and that `ok` accepts for this thief)
+function lend_pool_steal!(pool::LendPool, thief::Int, ok=Returns(true))
     @lock pool.lock begin
         for i in length(pool.queue):-1:1
             rec = pool.queue[i]
             rec.nolend && continue
+            ok(rec) || continue
             deleteat!(pool.queue, i)
             rec.state = LEND_LENT
             rec.thief = thief
@@ -180,10 +210,11 @@ end
 
 const LEND_TAG = 1
 const LEND_REQ = UInt8(1)      # (REQ, thief, delta)      a rank with free slots asks for `delta` more tasks
-const LEND_GRANT = UInt8(2)    # (GRANT, uid, home, bytes)   victim -> thief: run (f, args, kwargs)
+const LEND_GRANT = UInt8(2)    # (GRANT, uid, home, bytes, ops, refs)   victim -> thief: run (f, args, kwargs); ops update the cache
 const LEND_RETURN = UInt8(3)   # (RETURN, uid)            thief -> victim: no room, run it yourself
 const LEND_RESULT = UInt8(4)   # (RESULT, uid, bytes)
 const LEND_FAIL = UInt8(5)     # (FAIL, uid, bytes)       the exception, serialized
+const LEND_FLUSH = UInt8(6)    # (FLUSH, thief)           thief -> owner: your model of my cache is wrong, start it over
 
 mutable struct LendState
     const comm::MPI.Comm              # duplicate, lending traffic only
@@ -201,6 +232,13 @@ mutable struct LendState
     const n_returned::Threads.Atomic{Int}   # claims a thief handed back
     const n_stolen::Threads.Atomic{Int}     # tasks of other ranks run here
     const n_local::Threads.Atomic{Int}
+    const cache_bytes::Int                  # per (owner, thief) pair; 0: no cache
+    const cache_min::Int                    # arguments below this size are always sent
+    const max_bytes::Int                    # a task whose uncached arguments are larger is not lent
+    const models::Dict{Int,LendCacheModel}  # owner side: what each thief holds of ours
+    const mlock::ReentrantLock              # guards `models`, and keeps encode + send of one grant together
+    const held::Dict{Int,Dict{UInt64,Any}}  # thief side: what each owner asked us to keep (service task only)
+    const cstats::NTuple{6,Threads.Atomic{Int}}   # hits, puts, bytes sent, bytes saved, evicted, refused by the cap
 end
 
 const LEND_STATES = LockedObject(Dict{MPI.Comm,LendState}())
@@ -239,6 +277,86 @@ function lend_progress_sends!(st::LendState)
     return
 end
 
+# What the thief would still have to receive for `rec`: its arguments minus the ones it holds already
+function lend_uncached_bytes(st::LendState, thief::Int, rec::LendRecord)
+    model = @lock st.mlock get(st.models, thief, nothing)
+    total = 0
+    for a in rec.args
+        isbitstype(typeof(a)) && continue
+        if model !== nothing
+            ent = @lock st.mlock get(model.entries, objectid(a), nothing)
+            ent === nothing || continue
+        end
+        total += lend_bytes(a)
+    end
+    return total
+end
+
+# `(payload, ops, refs)` of one grant: the serialized `(f, args, kwargs)` with the cached arguments replaced by
+# `LendRef`s, the cache operations the thief must apply first (in order), and the ids the task refers to.
+# Called with `st.mlock` held, and the grant is sent before it is released: the model changes here, so grants to one
+# thief must leave in the order they were encoded.
+function lend_encode_task(st::LendState, thief::Int, rec::LendRecord)
+    if st.cache_bytes <= 0
+        return lend_encode((rec.f, rec.args, rec.kwargs)), Tuple{UInt8,UInt64,Vector{UInt8}}[], UInt64[]
+    end
+    model = get!(LendCacheModel, st.models, thief)
+    ops = Tuple{UInt8,UInt64,Vector{UInt8}}[]
+    refs = UInt64[]
+    args = Any[rec.args...]
+    keep = Set{UInt}()
+    try
+        if model.clear_pending
+            empty!(model.entries); empty!(model.order); model.bytes = 0; model.clear_pending = false
+            push!(ops, (LEND_OP_CLEAR, UInt64(0), UInt8[]))
+        end
+        hits, puts, sent, saved = 0, 0, 0, 0
+        for i in eachindex(args)
+            a = args[i]
+            lend_cacheable(a) || continue
+            key = objectid(a)
+            ent = get(model.entries, key, nothing)
+            if ent !== nothing
+                j = findfirst(==(key), model.order)
+                j === nothing || (deleteat!(model.order, j); push!(model.order, key))
+                args[i] = LendRef(ent[1]); push!(refs, ent[1]); push!(keep, key)
+                hits += 1; saved += ent[2]
+            else
+                nb = lend_bytes(a)
+                (st.cache_min <= nb <= st.cache_bytes) || continue
+                id = model.next_id; model.next_id += 1
+                blob = lend_encode(a)
+                push!(ops, (LEND_OP_PUT, id, blob))
+                model.entries[key] = (id, nb, a); push!(model.order, key); model.bytes += nb
+                args[i] = LendRef(id); push!(refs, id); push!(keep, key)
+                puts += 1; sent += length(blob)
+            end
+        end
+        j = 1
+        evicted = 0
+        while model.bytes > st.cache_bytes && j <= length(model.order)
+            key = model.order[j]
+            if key in keep
+                j += 1
+                continue
+            end
+            id, nb, _ = model.entries[key]
+            delete!(model.entries, key); deleteat!(model.order, j); model.bytes -= nb
+            push!(ops, (LEND_OP_EVICT, id, UInt8[]))
+            evicted += 1
+        end
+        payload = lend_encode((rec.f, Tuple(args), rec.kwargs))
+        Threads.atomic_add!(st.cstats[1], hits); Threads.atomic_add!(st.cstats[2], puts)
+        Threads.atomic_add!(st.cstats[3], sent + length(payload)); Threads.atomic_add!(st.cstats[4], saved)
+        Threads.atomic_add!(st.cstats[5], evicted)
+        return payload, ops, refs
+    catch
+        # the model has changed without the thief hearing of it: start it over at the next grant
+        empty!(model.entries); empty!(model.order); model.bytes = 0; model.clear_pending = true
+        rethrow()
+    end
+end
+
 # Victim: hand queued tasks to waiting thieves, round robin. Called by the service task and by a task
 # that has just queued itself (the service may not get a thread while every thread runs a task).
 function lend_serve_waiters!(st::LendState)
@@ -251,22 +369,29 @@ function lend_serve_waiters!(st::LendState)
             isempty(st.waiters) && return did
             thief, want = popfirst!(st.waiters)
         end
-        rec = lend_pool_steal!(st.pool, thief)
+        rec = lend_pool_steal!(st.pool, thief, st.max_bytes == typemax(Int) ? Returns(true) :
+                                               r -> (ok = lend_uncached_bytes(st, thief, r) <= st.max_bytes; ok || Threads.atomic_add!(st.cstats[6], 1); ok))
         if rec === nothing
             lend_add_waiter!(st, thief, want)
             return did
         end
-        payload = try
-            lend_encode((rec.f, rec.args, rec.kwargs))
-        catch
-            # not serializable: it has to run here
-            lend_pool_requeue!(st.pool, rec.uid; nolend=true)
-            lend_add_waiter!(st, thief, want)
-            continue
+        @lock st.mlock begin
+            enc = try
+                lend_encode_task(st, thief, rec)
+            catch
+                nothing
+            end
+            if enc === nothing
+                # not serializable: it has to run here
+                lend_pool_requeue!(st.pool, rec.uid; nolend=true)
+                lend_add_waiter!(st, thief, want)
+                continue
+            end
+            payload, ops, refs = enc
+            want > 1 && lend_add_waiter!(st, thief, want - 1; last=true)
+            lend_trace(:grant_send, thief, length(st.pool.queue))
+            lend_send!(st, thief, (LEND_GRANT, rec.uid, me, payload, ops, refs))
         end
-        want > 1 && lend_add_waiter!(st, thief, want - 1; last=true)
-        lend_trace(:grant_send, thief, length(st.pool.queue))
-        lend_send!(st, thief, (LEND_GRANT, rec.uid, me, payload))
         did = true
     end
 end
@@ -313,9 +438,10 @@ end
 
 # Thief: run a lent task on a free thread and answer. Whatever happens, the home gets an answer
 # (AGENTS.md lesson 9: an error on a detached task would be a hang on the owner).
-function lend_job(st::LendState, home::Int, uid::UInt64, payload::Vector{UInt8})
+function lend_job(st::LendState, home::Int, uid::UInt64, payload::Vector{UInt8}, resolved=nothing)
     msg = try
         f, args, kwargs = Serialization.deserialize(IOBuffer(payload))
+        resolved === nothing || (args = map(a -> a isa LendRef ? resolved[a.id] : a, args))
         v = @invokelatest f(args...; kwargs...)
         (LEND_RESULT, uid, lend_encode(v))
     catch err
@@ -335,8 +461,8 @@ function lend_job(st::LendState, home::Int, uid::UInt64, payload::Vector{UInt8})
     return
 end
 
-function lend_start_job!(st::LendState, home::Int, uid::UInt64, payload::Vector{UInt8})
-    t = Task(() -> lend_job(st, home, uid, payload))
+function lend_start_job!(st::LendState, home::Int, uid::UInt64, payload::Vector{UInt8}, resolved=nothing)
+    t = Task(() -> lend_job(st, home, uid, payload, resolved))
     # N.B. `sticky = false` alone is not enough: a Task made by a task that is bound to a thread
     # (the one that calls `enable_delegation!`, the service) starts on that thread too
     Dagger.set_task_migratable!(t)
@@ -353,16 +479,51 @@ function lend_handle!(st::LendState, src::Int, msg)
         _, thief, want = msg
         lend_add_waiter!(st, Int(thief), Int(want); last=true)
     elseif kind == LEND_GRANT
-        _, uid, home, payload = msg
+        _, uid, home, payload, ops, refs = msg
         st.owed[src+1] = max(st.owed[src+1] - 1, 0)
-        if lend_pool_try_take!(st.pool)
+        # The cache operations first, in order, whether or not this task runs here: the owner's model counts on them
+        resolved = nothing
+        missing_ref = false
+        if !isempty(ops) || !isempty(refs)
+            held = get!(Dict{UInt64,Any}, st.held, Int(home))
+            for (op, id, blob) in ops
+                if op == LEND_OP_PUT
+                    held[id] = Serialization.deserialize(IOBuffer(blob))
+                elseif op == LEND_OP_EVICT
+                    delete!(held, id)
+                else
+                    empty!(held)
+                end
+            end
+            if !isempty(refs)
+                resolved = Dict{UInt64,Any}()
+                for id in refs
+                    if haskey(held, id)
+                        resolved[id] = held[id]
+                    else
+                        missing_ref = true
+                    end
+                end
+            end
+        end
+        if missing_ref
+            # never expected; give the task back and ask the owner to forget what it thinks we hold
+            st.owed[src+1] = 0
+            lend_send!(st, src, (LEND_FLUSH, MPI.Comm_rank(st.comm)))
+            lend_send!(st, src, (LEND_RETURN, uid))
+        elseif lend_pool_try_take!(st.pool)
             Threads.atomic_add!(st.n_stolen, 1)
             lend_trace(:job_start, src, uid)
-            lend_start_job!(st, Int(home), uid, payload)
+            lend_start_job!(st, Int(home), uid, payload, resolved)
         else
             # no room any more: give it back, and drop the request that sent it
             st.owed[src+1] = 0
             lend_send!(st, src, (LEND_RETURN, uid))
+        end
+    elseif kind == LEND_FLUSH
+        @lock st.mlock begin
+            model = get(st.models, Int(msg[2]), nothing)
+            model === nothing || (empty!(model.entries); empty!(model.order); model.bytes = 0; model.clear_pending = true)
         end
     elseif kind == LEND_RETURN
         uid = msg[2]
@@ -433,15 +594,19 @@ function lend_service_loop(st::LendState)
     return
 end
 
-function Dagger.enable_delegation!(accel::MPIAcceleration; slots::Integer=max(Threads.nthreads(:default) - 1, 1))
+function Dagger.enable_delegation!(accel::MPIAcceleration; slots::Integer=max(Threads.nthreads(:default) - 1, 1),
+                                   cache_bytes::Integer=0, cache_min_bytes::Integer=64 << 10, max_bytes::Integer=typemax(Int))
     slots >= 1 || throw(ArgumentError("slots must be positive"))
+    cache_bytes >= 0 || throw(ArgumentError("cache_bytes must not be negative"))
     lend_state_for(accel.comm) === nothing || return nothing
     # Collective, like every other communicator the backend creates
     comm = MPI.Comm_dup(accel.comm)
     sz = MPI.Comm_size(comm)
     st = LendState(comm, accel.comm, LendPool(slots), Threads.Atomic{Bool}(true), nothing,
                    ReentrantLock(), Tuple{MPI.Request,Vector{UInt8}}[], ReentrantLock(), Tuple{Int,Int}[],
-                   zeros(Int, sz), (Threads.Atomic{Int}(0) for _ in 1:5)...)
+                   zeros(Int, sz), (Threads.Atomic{Int}(0) for _ in 1:5)...,
+                   Int(cache_bytes), Int(cache_min_bytes), Int(max_bytes), Dict{Int,LendCacheModel}(), ReentrantLock(),
+                   Dict{Int,Dict{UInt64,Any}}(), ntuple(_ -> Threads.Atomic{Int}(0), 6))
     lock(LEND_STATES) do states
         states[accel.comm] = st
     end
@@ -469,7 +634,8 @@ function lend_warmup!(st::LendState)
     # N.B. Not through the waiters: another rank's request may already be registered and would get the record
     claimed = lend_pool_steal!(st.pool, me)
     claimed === rec || error("lend warm-up: claimed the wrong record")
-    lend_send!(st, me, (LEND_GRANT, rec.uid, me, lend_encode((rec.f, rec.args, rec.kwargs))))
+    lend_send!(st, me, (LEND_GRANT, rec.uid, me, lend_encode((rec.f, rec.args, rec.kwargs)),
+                        Tuple{UInt8,UInt64,Vector{UInt8}}[], UInt64[]))
     lend_serve_waiters!(st)      # compile only (nobody has to be waiting)
     deadline = time() + 30
     while rec.state != LEND_DONE && time() < deadline
@@ -513,6 +679,22 @@ function Dagger.disable_delegation!(accel::MPIAcceleration)
     req = MPI.Ibarrier(accel.comm)
     __wait_for_request(req, accel.comm, MPI.Comm_rank(accel.comm), -1, 0, "disable_delegation", "barrier")
     lend_stop!(accel.comm)
+    return nothing
+end
+
+function Dagger.delegation_cache_stats(accel::MPIAcceleration)
+    st = lend_state_for(accel.comm)
+    st === nothing && return nothing
+    c = st.cstats
+    return (hits=c[1][], puts=c[2][], bytes_sent=c[3][], bytes_saved=c[4][], evicted=c[5][], refused_by_cap=c[6][])
+end
+
+function Dagger.lend_cache_clear!(accel::MPIAcceleration)
+    st = lend_state_for(accel.comm)
+    st === nothing && return nothing
+    @lock st.mlock for model in values(st.models)
+        empty!(model.entries); empty!(model.order); model.bytes = 0; model.clear_pending = true
+    end
     return nothing
 end
 
