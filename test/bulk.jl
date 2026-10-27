@@ -25,4 +25,29 @@
         foreach(fetch, tasks)
         @test c[] == 200
     end
+    @testset "task arguments: the loop waits for DTasks and chunks" begin
+        # `f(i, args...)`; the first argument is produced by a slow task, so the loop can only start after it
+        slow_vec(n) = (sleep(0.3); collect(1:n))
+        scale(i, v, w, out) = (out[i] = v[i] * w; nothing)
+        n = 400
+        out = zeros(Int, n)
+        v = Dagger.@spawn slow_vec(n)                      # a DTask argument
+        w = Dagger.tochunk(3)                              # a Chunk argument
+        t0 = time()
+        tasks = Dagger.dynamic_for_async(scale, n, v, w, out; workers=2)
+        @test time() - t0 < 0.25                           # returned at once: the caller did not wait for `v`
+        foreach(fetch, tasks)
+        @test out == 3 .* (1:n)
+        out2 = zeros(Int, n)
+        Dagger.dynamic_for(scale, n, v, 5, out2)           # blocking form, plain value argument
+        @test out2 == 5 .* (1:n)
+    end
+    @testset "called from inside tasks, with every thread busy" begin
+        # each outer task holds a processor while its loop runs: the loop must still finish
+        c = Threads.Atomic{Int}(0)
+        outer(c) = (Dagger.dynamic_for(i -> Threads.atomic_add!(c, 1), 50; workers=2); nothing)
+        ts = [Dagger.@spawn outer(c) for _ in 1:max(2, Threads.nthreads())]
+        @test all(t -> fetch(t) === nothing, ts)
+        @test c[] == 50 * length(ts)
+    end
 end
