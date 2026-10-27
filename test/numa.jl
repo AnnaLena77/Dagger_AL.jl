@@ -20,4 +20,12 @@
     fake_nodes = Dict(0 => [0, 1, 2, 3], 1 => [4, 5, 6, 7])
     fake_cpus = [0, 5, 2, -1, 7]            # threads 1..5
     @test Dagger.numa_threads(; cpus=fake_cpus, nodes=fake_nodes) == Dict(0 => [1, 3], 1 => [2, 5])
+    if Sys.islinux()
+        allowed = Dagger.allowed_cpus()
+        @test !isempty(allowed) && issorted(allowed)
+        @test_throws ArgumentError Dagger.pin_threads!(; cpus=Int[])
+    else
+        @test isempty(Dagger.allowed_cpus()) && isempty(Dagger.pin_threads!())
+    end
 end
+

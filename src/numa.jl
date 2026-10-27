@@ -88,3 +88,48 @@ function numa_threads(; cpus::Vector{Int}=thread_cpus(), nodes::Dict{Int,Vector{
     end
     return out
 end
+
+"""
+    allowed_cpus() -> Vector{Int}
+
+The CPUs this process may run on (Linux `sched_getaffinity`: what `numactl`, `taskset`, Open MPI `--bind-to` or the
+batch system allow), ascending. Empty off Linux.
+"""
+function allowed_cpus()
+    Sys.islinux() || return Int[]
+    buf = zeros(UInt8, 128)                       # room for 1024 CPUs
+    ccall(:sched_getaffinity, Cint, (Cint, Csize_t, Ptr{UInt8}), 0, 128, buf) == 0 || return Int[]
+    return Int[8 * (i - 1) + b for i in eachindex(buf) for b in 0:7 if (buf[i] >> b) & 1 == 1]
+end
+
+"""
+    pin_threads!(; cpus=allowed_cpus()) -> Vector{Int}
+
+Pin the default-pool Julia threads, in thread-id order, one to each of `cpus` (Linux), and return the resulting
+[`thread_cpus`](@ref). Use it where `JULIA_EXCLUSIVE=1` is wrong: that pins thread `i` to CPU `i-1` and ignores the
+process's CPU mask, so several ranks on a node would all pin onto the same cores. Here the default is the CPUs the
+launcher allowed, so a rank bound to its own cores or NUMA domain stays inside it. Throws when there are fewer CPUs
+than threads. Call it once at startup, before the threads do work; it does nothing off Linux.
+"""
+function pin_threads!(; cpus::Vector{Int}=allowed_cpus())
+    Sys.islinux() || return Int[]
+    tids = [tid for tid in 1:Threads.maxthreadid() if Threads.threadpool(tid) === :default]
+    length(cpus) >= length(tids) || throw(ArgumentError("$(length(tids)) threads but only $(length(cpus)) CPUs to pin them to"))
+    errs = Int[]
+    tasks = Task[]
+    for (k, tid) in enumerate(tids)
+        cpu = cpus[k]
+        t = Task() do
+            mask = zeros(UInt8, 128)
+            mask[(cpu >> 3) + 1] = UInt8(1) << (cpu & 7)
+            # pid 0: the calling thread
+            ccall(:sched_setaffinity, Cint, (Cint, Csize_t, Ptr{UInt8}), 0, 128, mask) == 0 || push!(errs, tid)
+        end
+        set_task_tid!(t, tid)
+        schedule(t)
+        push!(tasks, t)
+    end
+    foreach(wait, tasks)
+    isempty(errs) || @warn "Could not pin threads" errs
+    return thread_cpus()
+end
