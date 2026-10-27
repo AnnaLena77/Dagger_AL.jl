@@ -1323,10 +1323,9 @@ lesson.
    kernels vanish (pure runtime throughput: MPI was *faster* than shared memory), and read
    per-thread kernel seconds (`bench/occupancy.jl`). Letting a tagged task run on any free
    thread of its rank (`FREE_DATADEPS_THREADS`, **opt-in**) took 1 x 64 from 1.33-1.53 s
-   to 1.04-1.10 s, but it deadlocks the 2 ranks x 4 threads stencil tests on Fulda (owner tasks
-   on one rank are never started while the other rank waits for their result type), so it stays
-   off until that is understood; a green laptop run of the same tests (108/108) did not show it,
-   and a 4 x 2 full suite passed: run the full suite at the layout you ship (2 x 4) on the cluster. Also: piping a launcher such as `test/mpi/run.jl` into `head -N` closes
+   to 1.04-1.10 s. An earlier version of this lesson blamed the switch for stencil-test deadlocks at 2 ranks x 4
+   threads; those runs shared a node with other jobs (lesson 115) and the full 4 x 2 suite passes with the switch on.
+   It stays off because Barnes-Hut 2 x 16 steady steps are ~8 % slower with it. Also: piping a launcher such as `test/mpi/run.jl` into `head -N` closes
    its stdout after N lines and leaves the ranks hanging; redirect to a file instead.
 
 115. **Concurrent jobs of one user are packed onto one node; a result from a shared

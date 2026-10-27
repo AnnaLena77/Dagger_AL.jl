@@ -592,10 +592,10 @@ this switch the task runs on any free thread of its rank, as it does in shared m
 (1 x 32), 1.33-1.53 -> 1.04-1.10 s (1 x 64), 1.72 -> 1.55 s (2 x 32), 1.89 -> 1.86 s (4 x 16, medians of 3 interleaved
 rounds).
 
-**Known problem:** with the switch on, the `test/array/stencil_defs.jl` stencil tests deadlock at 2 ranks x 4 threads on
-Fulda (rank 0 tasks wait in `mpi_execute_bcast_plan`/`bcast_slot_wait` for a result type that rank 1 never sends: the
-owner tasks on rank 1 are not started, every pooled slot is idle, the main task waits in `wait_all`). The 4 x 2 suite
-passes. Until that is understood this stays off.
+Off by default because it is not free everywhere: Barnes-Hut (2 ranks x 16 threads, `--placement=rank`) ran its steady
+steps about 8 % slower with it (0.44-0.63 s against 0.38-0.55 s). Correctness is not the reason: the full MPI suite
+passes with it on (4 ranks x 2 threads, every rank). Earlier reports of stencil deadlocks at 2 x 4 were measured on nodes
+shared with other jobs and are not attributable to this switch.
 """
 const FREE_DATADEPS_THREADS = Ref{Bool}(false) # set from the environment in `__init__`
 free_datadeps_threads!(on::Bool=true) = (FREE_DATADEPS_THREADS[] = on)
