@@ -1355,3 +1355,14 @@ lesson.
    `fetch` of an unlaunched `DTask` argument), and drain in a `finally`. Real Cholesky
    8192/256 went 1.07 -> 0.92 s at 32 threads and 1.20 -> 0.93 s at 64.
 
+117. **A phase that is a quarter of a pipelined region's schedule time is not on its critical path.**
+   The 4-rank Cholesky spent 0.15-0.43 s of a 1.2 s schedule phase in per-slot header rendezvous (8 ms
+   at one rank), and batching them into one message per rank pair cut that phase by 65 % locally and
+   changed the wall time by nothing on the cluster (4 x 16: 1.86-1.93 -> 1.87-1.98 s): the planner
+   thread is paced by everything it waits for, so removed waiting reappears at the next wait. Before
+   building a protocol for a phase, make the phase *shorter in a model of the pipeline* or take the
+   cheap experiment that shows the wall time responds (here: the same A/B on a build that merely
+   forces the waits to happen earlier or later). Also: the fixture of a per-phase probe must be
+   fully waited and the ranks released together (lesson 30, 31); an unfenced `copyto!` tail looked like
+   0.2-0.7 s of "aliasing" and sent the first reading of this problem in the wrong direction.
+
