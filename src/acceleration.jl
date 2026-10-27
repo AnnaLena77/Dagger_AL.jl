@@ -175,6 +175,19 @@ function allreduce_value(op, x; init=nothing, kwargs...)
 end
 
 """
+    mpi_rank_gate!(on=true; cap, reserve)
+
+(MPI) Turn the rank gate on or off: a ready queue with a concurrency limit and priorities for the tasks a rank runs on its
+free threads. Without it every ready task starts at once and Julia runs them first come first served, so a flood of long tasks
+delays a small urgent task submitted after it by the whole backlog. With it at most `cap - reserve` ordinary tasks run at once
+(`cap` defaults to the number of default threads, `reserve` to 1), `priority > 0` tasks (`Dagger.@spawn priority=1 f(x)`) may use
+the reserved slot, and waiting tasks get slots by priority, then arrival. Also `JULIA_DAGGER_MPI_RANK_GATE=1`
+(`..._RESERVE=k`). A task holds a slot only while its function runs; a task that blocks on another task of the same rank
+inside its function can starve itself of slots, so give such waiters `priority=1`. Defined by the MPI extension.
+"""
+function mpi_rank_gate! end
+
+"""
     barrier(; comm)
 
 SPMD barrier that waits cooperatively (a non-blocking `MPI_Ibarrier` polled with `yield`): no thread is parked inside MPI

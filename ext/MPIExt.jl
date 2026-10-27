@@ -2574,9 +2574,95 @@ end
 mpi_thread_requested(opts::Options) =
     mpi_task_scope(opts) isa Dagger.ExactScope && !(Dagger.FREE_DATADEPS_THREADS[] && opts.tag !== nothing)
 
+# --- The rank gate: a ready queue with a concurrency limit and priorities for the tasks of a rank --------------
+#
+# Under MPI every task has occupancy 0, so Dagger's processor queues never hold one back: each task that is ready
+# starts at once as a Julia task, and Julia runs them first come first served on the threads of the rank. A flood of
+# long tasks (250 walk tiles of 30 ms on 8 threads = ~0.9 s of backlog) then delays a small urgent task submitted
+# after it (the export the other ranks wait for) by the whole backlog: measured, with `LLM_info/bench/tiles_latency.jl`,
+# 98-211 ms against 0-1 ms when the same work is 4 self-scheduling workers, and in the Barnes-Hut application one task per
+# tile was 60-80 % slower under MPI because the other ranks finished seconds later. The gate gives the rank what a
+# shared-memory processor queue has: at most `cap - reserve` ordinary tasks run at once (the rest wait, holding no thread),
+# `reserve` slots are kept for urgent tasks (`priority > 0`), and waiting tasks are granted slots by priority, then arrival.
+# It wraps only the call of the task's function (arguments are already moved, the result is not yet broadcast), so a task
+# holds a slot only while it computes. Opt-in: `JULIA_DAGGER_MPI_RANK_GATE=1` / `Dagger.mpi_rank_gate!(true)`.
+mutable struct RankGate
+    const lock::ReentrantLock
+    const cap::Int
+    const reserve::Int
+    running::Int
+    seq::UInt64
+    const waiters::Vector{Tuple{Int,UInt64,Base.Event}}      # (priority, arrival, wake-up)
+end
+RankGate(cap::Int, reserve::Int) = RankGate(ReentrantLock(), max(1, cap), clamp(reserve, 0, max(0, cap - 1)), 0, UInt64(0),
+                                           Tuple{Int,UInt64,Base.Event}[])
+const MPI_RANK_GATE_ON = Ref(false)
+const MPI_RANK_GATE = Ref{Union{Nothing,RankGate}}(nothing)
+function Dagger.mpi_rank_gate!(on::Bool=true; cap::Int=Threads.nthreads(:default),
+                               reserve::Int=parse(Int, get(ENV, "JULIA_DAGGER_MPI_RANK_GATE_RESERVE", "1")))
+    MPI_RANK_GATE[] = on ? RankGate(cap, reserve) : nothing
+    MPI_RANK_GATE_ON[] = on
+    return on
+end
+gate_limit(g::RankGate, priority::Int) = priority > 0 ? g.cap : g.cap - g.reserve
+
+function gate_acquire!(g::RankGate, priority::Int)
+    ev = nothing
+    @lock g.lock begin
+        if g.running < gate_limit(g, priority) && isempty(g.waiters)
+            g.running += 1
+        else
+            ev = Base.Event()
+            push!(g.waiters, (priority, g.seq += 1, ev))
+            # a slot may be free for this task even though others wait (they may be ordinary tasks blocked by the reserve)
+            gate_grant!(g)
+        end
+    end
+    ev === nothing || wait(ev)
+    return
+end
+# Grant free slots to the best waiters (highest priority, then earliest); the lock is held
+function gate_grant!(g::RankGate)
+    while !isempty(g.waiters)
+        best = 0
+        for i in eachindex(g.waiters)
+            pr, sq, _ = g.waiters[i]
+            g.running < gate_limit(g, pr) || continue
+            if best == 0 || pr > g.waiters[best][1] || (pr == g.waiters[best][1] && sq < g.waiters[best][2])
+                best = i
+            end
+        end
+        best == 0 && return
+        _, _, ev = g.waiters[best]
+        deleteat!(g.waiters, best)
+        g.running += 1
+        notify(ev)
+    end
+end
+function gate_release!(g::RankGate)
+    @lock g.lock begin
+        g.running -= 1
+        gate_grant!(g)
+    end
+    return
+end
+
 # The task that runs `execute!` is a pooled, migratable task with its TLS in place, so
 # the function can simply be called: Julia runs it on whichever thread is free
 function mpi_run_unbound(f, args...; kwargs...)
+    gate = MPI_RANK_GATE_ON[] ? MPI_RANK_GATE[] : nothing
+    if gate !== nothing
+        opts = Dagger.get_tls().task_spec.options
+        gate_acquire!(gate, opts === nothing ? 0 : something(opts.priority, 0))
+        try
+            return mpi_run_unbound_call(f, args...; kwargs...)
+        finally
+            gate_release!(gate)
+        end
+    end
+    return mpi_run_unbound_call(f, args...; kwargs...)
+end
+function mpi_run_unbound_call(f, args...; kwargs...)
     try
         return @invokelatest f(args...; kwargs...)
     catch err
@@ -2801,6 +2887,7 @@ function initialize_acceleration!(a::MPIAcceleration)
     already && return
     # Tiles crossing ranks are libc buffers allocated and freed per region: keep their pages in the heap
     get(ENV, "JULIA_DAGGER_MALLOC_TUNE", "1") in ("1", "true") && Dagger.tune_malloc!()
+    get(ENV, "JULIA_DAGGER_MPI_RANK_GATE", "0") in ("1", "true") && Dagger.mpi_rank_gate!(true)
     if !MPI.Initialized()
         MPI.Init(;threadlevel=:multiple)
     end
