@@ -150,6 +150,20 @@ Pass `T` when the code that uses the result needs a fixed type, e.g. `allgather(
 allgather(tasks::AbstractVector, ::Type{T}) where {T} = convert(Vector{T}, allgather(tasks))
 
 """
+    allreduce(op, tasks; init) -> value
+
+SPMD collective: [`allgather`](@ref) the values of `tasks` and fold them with `op` **in list order**,
+`op(op(op(v1, v2), v3), ...)` (starting from `init` when given), on every process. Every process folds the same
+values in the same order, so the result is identical on all of them and independent of the order in which the
+results arrived: a floating-point sum is bitwise reproducible. No MPI collective is called from the driver (see
+`allgather`). Meant for one small value per task (a partial sum, a count, a bounding box); for large values
+combine them inside tasks first.
+"""
+function allreduce(op, tasks::AbstractVector; kwargs...)
+    return reduce(op, allgather(tasks); kwargs...)
+end
+
+"""
     per_group(f, comm, T)
 
 [`per_rank`](@ref) on the communicator `comm` instead of the world: every member of `comm` calls it

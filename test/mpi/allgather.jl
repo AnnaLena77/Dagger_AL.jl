@@ -82,3 +82,26 @@ ag_bad(i::Int) = i > 0 ? error("allgather failure $i") : i
     Dagger.check_uniformity!(true)
     MPI.Barrier(comm)
 end
+
+# `Dagger.allreduce`: the fold is in list order, so the floating-point result is bitwise the same on every rank
+# and the same as folding the gathered list on one process.
+ar_part(i::Int) = 1 / (1 + i)^1.3 * (iseven(i) ? -1.0 : 1.0)
+@testset "Dagger.allreduce" begin
+    last_thread(r) = Dagger.ExactScope(last(sort(filter(p -> p.rank == r && p.innerProc isa Dagger.ThreadProc, mpi_procs());
+                                                  by=p -> p.innerProc.tid)))
+    Dagger.check_uniformity!(false)
+    Dagger.elide_foreign_tasks!(true)
+    try
+        n = 3 * nranks + 2
+        ts = [Dagger.@spawn(scope=last_thread(mod(i, nranks)), return_type=Float64, ar_part(i)) for i in 1:n]
+        total = Dagger.allreduce(+, ts)
+        @test total === foldl(+, ar_part.(1:n))
+        @test allequal(MPI.Allgather(reinterpret(UInt64, [total])[1], comm))       # identical bits on every rank
+        @test Dagger.allreduce(+, ts; init=10.0) === foldl(+, ar_part.(1:n); init=10.0)
+    finally
+        Dagger.elide_foreign_tasks!(false)
+        Dagger.check_uniformity!(true)
+    end
+    MPI.Barrier(comm)
+end
+

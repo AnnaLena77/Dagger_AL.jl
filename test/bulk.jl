@@ -56,4 +56,34 @@
         @test all(t -> fetch(t) === nothing, ts)
         @test c[] == 50 * length(ts)
     end
+    @testset "dynamic_reduce: fixed combination order" begin
+        # floating-point sum: bitwise the same for every worker count and run, and equal to the chunked fold in order
+        x = [1 / (1 + i)^1.1 * (iseven(i) ? -1 : 1) for i in 1:5000]
+        ref(chunk) = begin
+            parts = [foldl(+, (x[i] for i in (lo + 2):min(lo + chunk, 5000)); init=x[lo + 1]) for lo in 0:chunk:4999]
+            foldl(+, parts)
+        end
+        for chunk in (1, 7, 100)
+            results = [Dagger.dynamic_reduce((i, v) -> v[i], +, 5000, x; chunk, workers=w) for w in (1, 2, 8, 8)]
+            @test all(r -> r === ref(chunk), results)       # same bits, not just approximately equal
+        end
+        @test Dagger.dynamic_reduce((i, v) -> v[i], +, 5000, x) === Dagger.dynamic_reduce((i, v) -> v[i], +, 5000, x; workers=3)
+        # not commutative: the order of the indices is kept
+        @test Dagger.dynamic_reduce(i -> string(i, ","), *, 40; chunk=6, workers=4) == join(string.(1:40, ","))
+        # init, empty range, a DTask argument, a failure
+        @test Dagger.dynamic_reduce(i -> i, +, 100; init=1000) == 1000 + 5050
+        @test Dagger.dynamic_reduce(i -> i, +, 0; init=7) == 7
+        @test_throws ArgumentError Dagger.dynamic_reduce(i -> i, +, 0)
+        slow_range(n) = (sleep(0.2); collect(1:n))
+        v = Dagger.@spawn slow_range(100)
+        @test Dagger.dynamic_reduce((i, vec) -> vec[i], +, 100, v) == 5050
+        @test_throws Exception Dagger.dynamic_reduce(i -> i == 7 ? error("boom") : 1, +, 100)
+    end
+    @testset "allreduce without MPI folds in list order" begin
+        tasks = [Dagger.@spawn(identity(i)) for i in 1:10]
+        @test Dagger.allreduce(+, tasks) == 55
+        @test Dagger.allreduce(*, [Dagger.@spawn(identity(string(i))) for i in 1:5]) == "12345"
+        @test Dagger.allreduce(+, tasks; init=100) == 155
+    end
 end
+
