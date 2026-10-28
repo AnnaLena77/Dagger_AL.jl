@@ -1650,7 +1650,20 @@ function start_bcast_relay!(accel_comm::MPI.Comm)
     # broadcasts the other ranks wait for: a cross-rank cycle (it hung the full MPI suite across two nodes, where
     # those collectives take longer than in shared memory). Lesson 98 made the lend service migratable and left this
     # task bound.
-    Dagger.set_task_migratable!(t)
+    # `auto`: migratable from 4 default threads on, the old placement (starts on the creator's thread) below. The relay is a
+    # polling loop that keeps a thread busy; migratable on a 2-thread rank it competes with the tasks for the only free thread
+    # and hung the delegation test 4 ranks x 2 threads (cluster: 3 of 3 runs; MPICH laptop: 1 of 5, against 0 of 5 and 0 of 4 for the
+    # old placement), pinned to the last thread was worse (3 of 5 hung). From 4 threads on it passes (4 and 8 threads, 2 nodes).
+    # `JULIA_DAGGER_MPI_RELAY=main|migratable|last` forces a placement.
+    mode = get(ENV, "JULIA_DAGGER_MPI_RELAY", "auto")
+    nthr = Threads.nthreads(:default)
+    if mode == "main" || (mode == "auto" && nthr < 4)
+        t.sticky = false
+    elseif mode == "last"
+        Dagger.set_task_tid!(t, nthr)
+    else
+        Dagger.set_task_migratable!(t)
+    end
     schedule(t)
     Dagger.Sch.errormonitor_tracked("mpi_bcast_relay", t)
     state.relay = t
