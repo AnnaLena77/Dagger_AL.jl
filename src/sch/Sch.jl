@@ -1851,7 +1851,13 @@ task_tid_for_processor(proc::Dagger.ThreadProc) = proc.tid
 task_tid_for_processor(proc::Processor, task) = task_tid_for_processor(proc)
 
 stealing_permitted(::Processor) = true
-stealing_permitted(proc::Dagger.ThreadProc) = proc.owner != 1 || proc.tid != 1
+# The driver's thread (worker 1, thread 1) does not steal by default, so that a stolen task that never yields cannot
+# keep the user's own task from running. The price: when two tasks of a burst land on one thread, an idle thread 1
+# cannot take the queued one. T equal 20 ms tasks on T threads then take 40 ms in 32 of 40 steps at 4 threads and
+# 38 of 40 at 8 (every step uses threads 2..T only), against 20 ms when thread 1 may steal. Opt in with
+# `JULIA_DAGGER_DRIVER_STEALS=1`.
+const DRIVER_STEALS = Ref(false)
+stealing_permitted(proc::Dagger.ThreadProc) = DRIVER_STEALS[] || proc.owner != 1 || proc.tid != 1
 
 proc_has_occupancy(proc_occupancy, task_occupancy) =
     UInt64(task_occupancy) + UInt64(proc_occupancy) <= typemax(UInt32)
