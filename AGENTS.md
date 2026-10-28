@@ -1428,3 +1428,18 @@ lesson.
    leaves no thread for the scheduler's own `do_task` of the urgent task (60-212 ms). Test the
    latency before the first `@test` of a testset: it compiles for ~80 ms inside the timing window.
 
+124. **A fix for one thread count can break another: place the relay by thread count, and test the
+   layouts you ship, not only the one that failed.** Making the broadcast relay migratable (lesson 122)
+   cured the two-node suite stall at 4 threads per rank and hung the standalone delegation test at 2
+   threads per rank: the relay is a polling loop that keeps a thread busy, and a migratable one
+   competes with the tasks for the only free thread. Measured, delegation 4 ranks x 2 threads: old
+   placement 0 of 4 hung (cluster) and 0 of 5 (laptop MPICH), migratable 3 of 3 and 1 of 5, pinned
+   to the last thread 3 of 5; at 4 and 8 threads migratable passed 3 of 3 each. Rule now: migratable
+   from 4 default threads on (`JULIA_DAGGER_MPI_RELAY=main|migratable|last` forces one). How it was
+   found: the full suites passed (they leave free MPI threads off, lesson in `free_threads.jl`), the
+   standalone test at the same layout did not; the tag and the build before the change passed it, so
+   bisect by *builds* (revert one commit, export, run 4 times), and first make the failure reproduce
+   on the laptop (it did, 1 run in 5): a flake needs a failure *rate* per variant, not one run.
+   Also: when a monitor expires it says nothing; poll the log yourself, and read `squeue` output
+   as empty = not running.
+
