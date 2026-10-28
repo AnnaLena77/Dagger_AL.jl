@@ -1857,8 +1857,8 @@ stealing_permitted(::Processor) = true
 # 38 of 40 at 8 (every step uses threads 2..T only), against 20 ms when thread 1 may steal. Opt in with
 # `JULIA_DAGGER_DRIVER_STEALS=1`.
 const DRIVER_STEALS = Ref(false)
-# Experimental (`JULIA_DAGGER_STEAL_MOVE_PRESSURE=1`): a stolen task carries its reserved load to the thief
-const STEAL_MOVE_PRESSURE = Ref(false)
+# On by default (`JULIA_DAGGER_STEAL_MOVE_PRESSURE=0` turns it off): a stolen task carries its reserved load to the thief
+const STEAL_MOVE_PRESSURE = Ref(true)
 # The placement reserved `est` on the counter of the processor it chose; a thief that takes the task runs it, so
 # the victim looks loaded and the thief idle until the task ends, and the next task of a burst is placed on the
 # (busy) thief and waits behind it. Moves the reservation, and the entry the completion releases, to the thief.
