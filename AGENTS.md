@@ -1443,3 +1443,17 @@ lesson.
    Also: when a monitor expires it says nothing; poll the log yourself, and read `squeue` output
    as empty = not running.
 
+
+125. **A region of a few hundred tasks after one warm-up can still be mostly
+   compilation.** The "range views cost 776 us/task, 4.5x a tile chunk" figure
+   (lesson 121) came from 500 tasks after a single warm-up region, and drove a
+   plan for a new "disjoint ranges" declaration. Re-measured on the same tag
+   (64 threads, 2000 tasks, eight repetitions in one process): the first region
+   is 22.7 ms/task for views and 2.2 ms/task for tile chunks (compilation of the
+   new signature), and from the second on views cost 215-220 us against
+   168-178 us (1.27x, +47 us). A feature that would have saved 47 us per task was
+   nearly built on a cold number. Before building from a per-task cost, repeat
+   the region at least five times in one process, show the first repetition
+   separately, and confirm the figure survives; a laptop run that disagrees by
+   more than the usual 7-20x hardware factor (lesson 88) is a hint that the
+   cluster number is cold.
