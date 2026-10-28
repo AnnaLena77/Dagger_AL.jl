@@ -116,6 +116,20 @@ Usage, rules and pitfalls are in `MPI_FEATURES.md` at the repository root (on `i
   thread that has no Dagger processor. It fixes late delivery of results (0.34-0.44 s -> 0.05-0.08 s when all but one thread are busy with
   non-yielding code) but takes the only free thread, so it was net worse at 3 ranks x 4 threads with 3 busy threads.
 
+## 6b. Branches added 2026-10-24 .. 28 (all merged into `perf/task-overhead` unless marked; one note each)
+
+| Note | What |
+|---|---|
+| `perf__datadeps-free-threads.md`, `perf__flat-async-submit.md`, `perf__datadeps-avoid-driver.md` | opt-in free Datadeps threads, async submission of flat regions, driver-thread rule |
+| `feat__datadeps-elide.md` | Datadeps elision (opt-in, -8..-10 % Cholesky 4 x 16); `feat__datadeps-elide-foreign.md` is the shelved first prototype |
+| `perf__mpi-malloc-tune.md` | `mallopt` at MPI start (-3..-16 % multi-rank Cholesky) |
+| `fix__relay-placement.md` | relay not on the driver'"'"'s thread (migratable from 4 threads), cooperative collectives; fixes a two-node suite stall |
+| `feat__mpi-rank-gate.md` | opt-in ready queue with a concurrency limit and priorities for MPI tasks (`priority=1`) |
+| `feat__lend-cache.md` | opt-in lending: thief-side argument cache and size cap |
+| `feat__numa-map.md` | thread-to-CPU / NUMA map, `pin_threads!` |
+| `feat__reduce.md` | `dynamic_for` with arguments and counts, `dynamic_reduce`, `allreduce` |
+| `shelved__slot-header-prefetch.md`, `shelved__task-priority.md` | measured, no gain (kept as records) |
+
 ## 7. Glossary (Dagger-internal terms)
 
 * **Elision**: a rank skips building a task it neither runs nor needs data for; it only takes the same ids and stamps a placeholder.
