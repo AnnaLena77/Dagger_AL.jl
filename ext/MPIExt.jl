@@ -1585,13 +1585,14 @@ function bcast_relay_loop(state::BcastState)
     # single-threaded rank it would instead starve the very tasks the relay
     # exists to serve, so there we keep the pure `yield()` loop.
     may_backoff = Threads.nthreads() > 1
+    spin_iters = parse(Int, get(ENV, "JULIA_DAGGER_MPI_RELAY_SPINS", string(BCAST_RELAY_SPIN_ITERS)))
     while state.running[]
         try
             MPI.Finalized() && break
             got, msg, stat = MPI.Improbe(MPI.ANY_SOURCE, MPI.ANY_TAG, comm, MPI.Status)
             if !got
                 idle += 1
-                if idle <= BCAST_RELAY_SPIN_ITERS || !may_backoff
+                if idle <= spin_iters || !may_backoff
                     yield()
                 else
                     # N.B. `Libc.systemsleep`, not `sleep`: `sleep` parks the
@@ -1661,6 +1662,10 @@ function start_bcast_relay!(accel_comm::MPI.Comm)
         t.sticky = false
     elseif mode == "last"
         Dagger.set_task_tid!(t, nthr)
+    elseif mode == "interactive" && Threads.nthreads(:interactive) > 0
+        # A thread of the interactive pool (`-t N,1`) is not one of the threads the scheduler places tasks on
+        t.sticky = false
+        Base.Threads._spawn_set_thrpool(t, :interactive)
     else
         Dagger.set_task_migratable!(t)
     end
