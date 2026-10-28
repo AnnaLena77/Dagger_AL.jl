@@ -1575,7 +1575,7 @@ const BCAST_RELAY_HEARTBEAT_ITERS = 1000
 # forward the raw bytes to this rank's tree children, then deliver the payload.
 # Forwarding is NOT gated by datadeps task dispatch — that is what breaks the
 # forwarder wait-cycle.
-function bcast_relay_loop(state::BcastState)
+function bcast_relay_loop(state::BcastState, spin_iters::Int=BCAST_RELAY_SPIN_ITERS)
     comm = state.bcast_comm
     rank = MPI.Comm_rank(comm)
     sz = MPI.Comm_size(comm)
@@ -1585,7 +1585,6 @@ function bcast_relay_loop(state::BcastState)
     # single-threaded rank it would instead starve the very tasks the relay
     # exists to serve, so there we keep the pure `yield()` loop.
     may_backoff = Threads.nthreads() > 1
-    spin_iters = parse(Int, get(ENV, "JULIA_DAGGER_MPI_RELAY_SPINS", string(BCAST_RELAY_SPIN_ITERS)))
     while state.running[]
         try
             MPI.Finalized() && break
@@ -1644,7 +1643,16 @@ function start_bcast_relay!(accel_comm::MPI.Comm)
     lock(BCAST_STATES) do states
         states[accel_comm] = state
     end
-    t = Task(() -> bcast_relay_loop(state))
+    mode = get(ENV, "JULIA_DAGGER_MPI_RELAY", "auto")
+    nthr = Threads.nthreads(:default)
+    # A migratable relay that spins on `yield()` wakes another thread with every call (the task goes back to the shared
+    # queue), which keeps most of a rank's threads out of sleep: a cross-rank dependency cost 2.2-2.9 ms against 0.4 ms,
+    # and on the cluster the rank burned 181-216 CPU s per qr region against 44, with the kernels 6-14 % slower. A migratable
+    # relay therefore does not spin (it sleeps 100 us between probes at once); one that stays on the driver's thread keeps the spin,
+    # because it shares that thread and must yield to the tasks there. `JULIA_DAGGER_MPI_RELAY_SPINS` forces a count.
+    migratable = !(mode == "main" || (mode == "auto" && nthr < 4))
+    spin_iters = parse(Int, get(ENV, "JULIA_DAGGER_MPI_RELAY_SPINS", string(migratable ? 0 : BCAST_RELAY_SPIN_ITERS)))
+    t = Task(() -> bcast_relay_loop(state, spin_iters))
     # N.B. `sticky = false` alone is not enough: a `Task` made on a thread-bound task (the driver, once Distributed
     # has used `@async`) starts on its creator's thread. The relay would then share the driver's thread, and a driver
     # parked in a blocking MPI call (an `MPI.Allgather` or `Barrier` in user code) would stop it from forwarding the
@@ -1656,8 +1664,6 @@ function start_bcast_relay!(accel_comm::MPI.Comm)
     # and hung the delegation test 4 ranks x 2 threads (cluster: 3 of 3 runs; MPICH laptop: 1 of 5, against 0 of 5 and 0 of 4 for the
     # old placement), pinned to the last thread was worse (3 of 5 hung). From 4 threads on it passes (4 and 8 threads, 2 nodes).
     # `JULIA_DAGGER_MPI_RELAY=main|migratable|last` forces a placement.
-    mode = get(ENV, "JULIA_DAGGER_MPI_RELAY", "auto")
-    nthr = Threads.nthreads(:default)
     if mode == "main" || (mode == "auto" && nthr < 4)
         t.sticky = false
     elseif mode == "last"
