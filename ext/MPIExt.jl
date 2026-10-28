@@ -3769,4 +3769,15 @@ function Dagger.per_group(f, comm::MPI.Comm, ::Type{T}) where {T}
 end
 Dagger.per_rank(f, ::Type{T}) where {T} = Dagger.per_group(f, MPI.COMM_WORLD, T)
 
+# Precompile the concrete-MPI specializations of the planner that the first Datadeps region of a process
+# would otherwise compile (several seconds on a laptop, ~90 s on the Opteron nodes). The statements come from a
+# `--trace-compile` run; a statement that does not match this Dagger/Julia version is skipped.
+include("MPIExtPrecompileStatements.jl")
+for _stmt in MPI_PRECOMPILE_STATEMENTS
+    try
+        Core.eval(@__MODULE__, Meta.parse(_stmt))
+    catch
+    end
+end
+
 end # module MPIExt
