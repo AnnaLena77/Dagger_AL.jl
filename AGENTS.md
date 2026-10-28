@@ -1457,3 +1457,25 @@ lesson.
    separately, and confirm the figure survives; a laptop run that disagrees by
    more than the usual 7-20x hardware factor (lesson 88) is a hint that the
    cluster number is cold.
+
+126. **A polling task that calls `yield()` in a loop is not idle, it is a wake-up
+   generator.** The migratable MPI broadcast relay spun 4096 `yield()` calls after
+   every message; on a multi-threaded scheduler each `yield()` puts the task back on
+   the shared queue and wakes a sleeping thread to run it, so one polling loop kept
+   most of a rank's threads out of sleep. Symptoms looked unrelated: a cross-rank
+   dependency in a Datadeps chain cost 2.2-2.9 ms against 0.37-0.44 ms (2 ranks x 4
+   threads), tiled `lu` was 3.5x and `chol` 4x slower than with the relay off the
+   queue (laptop, N=2048, tiles 128), and on the cluster `qr` (2 ranks x 32 threads,
+   4096/512) was 14 % slower than stock although the kernels are identical code. What
+   exposed it was not a profile but two numbers per rank and region: process CPU
+   seconds (`/proc/self/stat`, user+system) against the sum of kernel seconds. Stock
+   used 52 CPU s for 42 s of kernels; the fork 181-216 CPU s for 44-48 s, and its
+   *kernels* were 6-14 % slower (shared FPUs and caches on the Opterons). When the same
+   code runs slower under one runtime than another, compare CPU seconds with useful
+   seconds before looking at the code. The relay now sleeps 100 us between probes from
+   the first idle iteration when it is migratable; a relay on the driver's thread (main,
+   or fewer than 4 threads) keeps the spin because it shares the thread. Forcing zero
+   spins on the driver's thread (4 ranks x 2 threads, relay forced migratable) hung the
+   delegation test in 2 of 5 runs, so the spin count depends on where the relay runs.
+   The same CPU-vs-kernel check applies to any future background loop (heartbeats,
+   lend service, steal polling).
