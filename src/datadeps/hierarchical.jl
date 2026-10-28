@@ -283,7 +283,7 @@ streamed through the asynchronous submitter, which overlaps planning with
 execution. `JULIA_DAGGER_UNIFORM_DEFER_MAX` sets it at startup (0 streams every
 region, a huge value defers every region).
 """
-const DATADEPS_UNIFORM_DEFER_MAX = Ref(2048)
+const DATADEPS_UNIFORM_DEFER_MAX = Ref(512)
 
 """
 How many tasks uniform (SPMD) planning places ahead so that the aliasing info of
@@ -1656,6 +1656,8 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
     # nothing while it plans, so the rendezvous chain runs at metadata speed and
     # the tasks then execute concurrently across ranks.
     #
+    # (Cluster, 1 rank x 32 threads, 4096^2 with 256^2 tiles, a 1496-task region: lunp 0.89 -> 0.76 s and chol 0.375 -> 0.335 s with the
+    # limit at 256, chol 0.297 s at 64; 2 ranks x 32 with the relay fix: lunp 1.21 -> 1.00 s, chol 0.54 -> 0.475 s. Hence 512.)
     # That is the right trade for a region of up to `DATADEPS_UNIFORM_DEFER_MAX`
     # tasks, whose planning is short. For a larger one planning and execution run
     # back to back instead of overlapping: a 5984-task Cholesky (8192^2, 256^2
