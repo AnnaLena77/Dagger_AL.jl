@@ -1857,6 +1857,35 @@ stealing_permitted(::Processor) = true
 # 38 of 40 at 8 (every step uses threads 2..T only), against 20 ms when thread 1 may steal. Opt in with
 # `JULIA_DAGGER_DRIVER_STEALS=1`.
 const DRIVER_STEALS = Ref(false)
+# Experimental (`JULIA_DAGGER_STEAL_MOVE_PRESSURE=1`): a stolen task carries its reserved load to the thief
+const STEAL_MOVE_PRESSURE = Ref(false)
+# The placement reserved `est` on the counter of the processor it chose; a thief that takes the task runs it, so
+# the victim looks loaded and the thief idle until the task ends, and the next task of a burst is placed on the
+# (busy) thief and waits behind it. Moves the reservation, and the entry the completion releases, to the thief.
+function move_stolen_pressure!(uid::UInt64, thunk_id::Int, to_proc::Processor)
+    state = EAGER_STATE[]
+    (state === nothing || state.uid != uid) && return
+    entry = lock(state.running_pressure_refs) do rpr
+        get(rpr, thunk_id, nothing)
+    end
+    entry === nothing && return
+    old_ref, est = entry
+    new_ref = lock(state.worker_time_pressure) do wtp
+        proc_map = get(wtp, root_worker_id(to_proc), nothing)
+        proc_map === nothing ? nothing : get!(proc_map, to_proc) do
+            Threads.Atomic{UInt64}(UInt64(0))
+        end
+    end
+    (new_ref === nothing || new_ref === old_ref) && return
+    lock(state.running_pressure_refs) do rpr
+        # Only if the task has not completed meanwhile (completion pops the entry)
+        haskey(rpr, thunk_id) || return
+        Threads.atomic_sub!(old_ref, est)
+        Threads.atomic_add!(new_ref, est)
+        rpr[thunk_id] = (new_ref, est)
+    end
+    return
+end
 stealing_permitted(proc::Dagger.ThreadProc) = DRIVER_STEALS[] || proc.owner != 1 || proc.tid != 1
 
 proc_has_occupancy(proc_occupancy, task_occupancy) =
@@ -2000,6 +2029,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                         thunk_id = first(task_and_occupancy).thunk_id
                         @dagdebug thunk_id :processor "Stolen from $from_proc by $to_proc"
                         @maybelog ctx timespan_finish(ctx, :proc_steal_local, (;uid, worker=wid, processor=to_proc), (;from_proc, thunk_id))
+                        STEAL_MOVE_PRESSURE[] && move_stolen_pressure!(uid, thunk_id, to_proc)
                         # TODO: Keep stealing until we hit full occupancy?
                         @goto execute
                     end
