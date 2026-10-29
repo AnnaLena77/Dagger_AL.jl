@@ -30,6 +30,20 @@ end
     @test_throws ArgumentError Dagger.rebalance_plan([0, 1], [1.0, 1.0], 2; speeds=[1.0, 0.0])
 end
 
+@testset "rebalance_plan: a move must pay for itself; predicted loads" begin
+    owners = [0, 0, 0, 0, 1, 1, 1]; costs = fill(1.0, 7)           # 4 and 3: moving a unit only swaps them
+    @test isempty(Dagger.rebalance_plan(owners, costs, 2; tolerance=1.0))
+    owners = [0, 0, 0, 0, 0, 0, 1, 1]; costs = fill(1.0, 8)       # 6 and 2: three units move, 3 s gain on the slow rank
+    free = Dagger.rebalance_plan(owners, costs, 2)
+    @test length(free) == 2
+    @test isempty(Dagger.rebalance_plan(owners, costs, 2; move_cost=5.0))               # each move gains <= 2 s: not worth 5 s in one step
+    @test length(Dagger.rebalance_plan(owners, costs, 2; move_cost=5.0, horizon=10)) == 2   # worth it if the placement lasts 10 steps
+    @test Dagger.rebalance_loads(owners, costs, 2) == [6.0, 2.0]
+    @test Dagger.rebalance_loads(owners, costs, 2; plan=free) == [4.0, 4.0]
+    @test Dagger.rebalance_loads(owners, costs, 2; speeds=[1.0, 2.0]) == [6.0, 1.0]
+    @test_throws ArgumentError Dagger.rebalance_plan(owners, costs, 2; move_cost=[1.0])
+end
+
 @testset "rebalance: chunks change owner, data intact, tasks follow" begin
     nr = MPI.Comm_size(comm)
     if nr >= 2

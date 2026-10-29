@@ -11,6 +11,10 @@ cost is closest to half the gap to the least loaded rank moves there, provided i
 would move twice moves once to its final rank, and a chunk whose rank does not change is not listed. Nothing moves when the load is
 already within `tolerance`.
 
+`move_cost` (seconds a move of each chunk takes: one number for all, or one per chunk) and `horizon` (the number of steps the new placement is expected
+to last, default 1) make a move pay for itself: a move is made only if the time it takes off the slower of the two ranks, times `horizon`, exceeds its cost
+(default cost 0: every narrowing move is made). [`rebalance_loads`](@ref) gives the per-rank times a plan predicts.
+
 `speeds` (one positive number per rank, only the ratios matter) declares that ranks differ in speed: `costs` are then WORK (e.g. interaction counts, or
 times measured on a reference rank), a rank needs `work / speed`, and the plan equalises that time instead of the work. Without it all ranks are
 assumed equally fast, and costs measured as *times on the rank that ran them* are inflated on a slow rank, so chunks drift back and forth: pass work
@@ -18,7 +22,8 @@ and speeds, or time-costs that are already speed-independent, or damp the costs 
 """
 function rebalance_plan(owners::AbstractVector{<:Integer}, costs::AbstractVector{<:Real}, nranks::Integer;
                         tolerance::Real=1.05, max_moves::Integer=length(owners),
-                        speeds::Union{Nothing,AbstractVector{<:Real}}=nothing)
+                        speeds::Union{Nothing,AbstractVector{<:Real}}=nothing,
+                        move_cost::Union{Real,AbstractVector{<:Real}}=0.0, horizon::Real=1)
     length(owners) == length(costs) || throw(ArgumentError("`owners` and `costs` must have the same length"))
     nranks >= 1 || throw(ArgumentError("nranks must be positive"))
     owner = Int[o for o in owners]
@@ -26,6 +31,10 @@ function rebalance_plan(owners::AbstractVector{<:Integer}, costs::AbstractVector
     spd = speeds === nothing ? ones(Float64, nranks) : Float64[x for x in speeds]
     length(spd) == nranks || throw(ArgumentError("`speeds` needs one entry per rank"))
     all(x -> isfinite(x) && x > 0, spd) || throw(ArgumentError("speeds must be finite and positive"))
+    mcost = move_cost isa Real ? fill(Float64(move_cost), length(owner)) : Float64[x for x in move_cost]
+    length(mcost) == length(owner) || throw(ArgumentError("`move_cost` needs one entry per chunk"))
+    all(x -> isfinite(x) && x >= 0, mcost) || throw(ArgumentError("move costs must be finite and non-negative"))
+    horizon > 0 || throw(ArgumentError("horizon must be positive"))
     c = Float64[x for x in costs]
     all(x -> isfinite(x) && x >= 0, c) || throw(ArgumentError("costs must be finite and non-negative"))
     load = zeros(Float64, nranks)
@@ -52,11 +61,36 @@ function rebalance_plan(owners::AbstractVector{<:Integer}, costs::AbstractVector
             end
         end
         best == 0 && break
+        # a move must pay for itself: the time it takes off the slowest of the two ranks, over `horizon` steps, against its cost
+        gain = load[hi] - max(load[hi] - bestcost / spd[hi], load[lo] + bestcost / spd[lo])
+        horizon * gain > mcost[best] || break
         owner[best] = lo - 1
         load[hi] -= bestcost / spd[hi]; load[lo] += bestcost / spd[lo]
         moved += 1
     end
     return Pair{Int,Int}[i => owner[i] for i in eachindex(owner) if owner[i] != owners[i]]
+end
+
+"""
+    rebalance_loads(owners, costs, nranks; speeds=nothing, plan=Pair{Int,Int}[]) -> Vector{Float64}
+
+The per-rank time (`work / speed`, summed over the chunks a rank owns) before the moves of `plan` (the default, an empty plan) or after them: the loads
+[`rebalance_plan`](@ref) predicts, to log against measured ones.
+"""
+function rebalance_loads(owners::AbstractVector{<:Integer}, costs::AbstractVector{<:Real}, nranks::Integer;
+                         speeds::Union{Nothing,AbstractVector{<:Real}}=nothing, plan=Pair{Int,Int}[])
+    length(owners) == length(costs) || throw(ArgumentError("`owners` and `costs` must have the same length"))
+    spd = speeds === nothing ? ones(Float64, nranks) : Float64[x for x in speeds]
+    length(spd) == nranks || throw(ArgumentError("`speeds` needs one entry per rank"))
+    owner = Int[o for o in owners]
+    for (i, r) in plan
+        owner[i] = r
+    end
+    load = zeros(Float64, nranks)
+    for i in eachindex(owner)
+        load[owner[i] + 1] += costs[i]
+    end
+    return load ./ spd
 end
 
 """
