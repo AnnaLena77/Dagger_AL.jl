@@ -3541,7 +3541,8 @@ _rebalance_rewrap(::Union{Tuple,AbstractVector}, members::Vector{Dagger.Chunk}) 
 _rebalance_rewrap(::Any, members::Vector{Dagger.Chunk}) = only(members)
 
 function Dagger.rebalance(accel::MPIAcceleration, chunks::AbstractVector, costs::AbstractVector;
-                          tolerance::Real=1.05, max_moves::Integer=length(chunks))
+                          tolerance::Real=1.05, max_moves::Integer=length(chunks),
+                          speeds::Union{Nothing,AbstractVector{<:Real}}=nothing)
     comm = accel.comm
     comm == MPI.COMM_WORLD || throw(ArgumentError("`Dagger.rebalance` works on the graph of the whole job, not on a rank-local or group graph"))
     groups = [_rebalance_members(x) for x in chunks]
@@ -3551,7 +3552,8 @@ function Dagger.rebalance(accel::MPIAcceleration, chunks::AbstractVector, costs:
         all(c -> Dagger.owner_rank(c) == o, g) || throw(ArgumentError("the chunks of one group must have the same owner"))
     end
     Dagger.check_uniform(Float64[x for x in costs])
-    plan = Dagger.rebalance_plan(owners, costs, MPI.Comm_size(comm); tolerance, max_moves)
+    speeds === nothing || Dagger.check_uniform(Float64[x for x in speeds])
+    plan = Dagger.rebalance_plan(owners, costs, MPI.Comm_size(comm); tolerance, max_moves, speeds)
     out = Any[chunks[i] isa Dagger.Chunk ? chunks[i] : _rebalance_rewrap(chunks[i], groups[i]) for i in eachindex(chunks)]
     moves = [(i, [Dagger.@spawn(scope=Dagger.scope(mpi_rank=dst), identity(c)) for c in groups[i]]) for (i, dst) in plan]
     for (i, ts) in moves

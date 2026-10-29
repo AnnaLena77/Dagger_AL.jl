@@ -10,13 +10,22 @@ what a collective needs. Greedy and sticky: while the most loaded rank exceeds `
 cost is closest to half the gap to the least loaded rank moves there, provided it narrows the gap; at most `max_moves` single moves, a chunk that
 would move twice moves once to its final rank, and a chunk whose rank does not change is not listed. Nothing moves when the load is
 already within `tolerance`.
+
+`speeds` (one positive number per rank, only the ratios matter) declares that ranks differ in speed: `costs` are then WORK (e.g. interaction counts, or
+times measured on a reference rank), a rank needs `work / speed`, and the plan equalises that time instead of the work. Without it all ranks are
+assumed equally fast, and costs measured as *times on the rank that ran them* are inflated on a slow rank, so chunks drift back and forth: pass work
+and speeds, or time-costs that are already speed-independent, or damp the costs yourself.
 """
 function rebalance_plan(owners::AbstractVector{<:Integer}, costs::AbstractVector{<:Real}, nranks::Integer;
-                        tolerance::Real=1.05, max_moves::Integer=length(owners))
+                        tolerance::Real=1.05, max_moves::Integer=length(owners),
+                        speeds::Union{Nothing,AbstractVector{<:Real}}=nothing)
     length(owners) == length(costs) || throw(ArgumentError("`owners` and `costs` must have the same length"))
     nranks >= 1 || throw(ArgumentError("nranks must be positive"))
     owner = Int[o for o in owners]
     all(o -> 0 <= o < nranks, owner) || throw(ArgumentError("owners must be ranks in 0:$(nranks - 1)"))
+    spd = speeds === nothing ? ones(Float64, nranks) : Float64[x for x in speeds]
+    length(spd) == nranks || throw(ArgumentError("`speeds` needs one entry per rank"))
+    all(x -> isfinite(x) && x > 0, spd) || throw(ArgumentError("speeds must be finite and positive"))
     c = Float64[x for x in costs]
     all(x -> isfinite(x) && x >= 0, c) || throw(ArgumentError("costs must be finite and non-negative"))
     load = zeros(Float64, nranks)
@@ -25,24 +34,26 @@ function rebalance_plan(owners::AbstractVector{<:Integer}, costs::AbstractVector
     end
     total = sum(load)
     total > 0 || return Pair{Int,Int}[]
-    mean_load = total / nranks
+    load ./= spd                       # from here on `load` is the time a rank needs: work / speed
+    mean_load = total / sum(spd)       # the time every rank would need with a perfect split
     moved = 0
     while moved < max_moves
         hi = argmax(load); lo = argmin(load)
         load[hi] <= tolerance * mean_load && break
         gap = load[hi] - load[lo]
+        ideal = gap / (1 / spd[hi] + 1 / spd[lo])   # the work that makes both ranks finish together (gap / 2 at equal speeds)
         best = 0; bestcost = 0.0
         for i in eachindex(owner)
             owner[i] == hi - 1 || continue
             ci = c[i]
-            (ci > 0 && ci < gap) || continue
-            if best == 0 || abs(ci - gap / 2) < abs(bestcost - gap / 2)
+            (ci > 0 && ci < gap * spd[lo]) || continue
+            if best == 0 || abs(ci - ideal) < abs(bestcost - ideal)
                 best = i; bestcost = ci
             end
         end
         best == 0 && break
         owner[best] = lo - 1
-        load[hi] -= bestcost; load[lo] += bestcost
+        load[hi] -= bestcost / spd[hi]; load[lo] += bestcost / spd[lo]
         moved += 1
     end
     return Pair{Int,Int}[i => owner[i] for i in eachindex(owner) if owner[i] != owners[i]]

@@ -15,6 +15,21 @@
     @test_throws ArgumentError Dagger.rebalance_plan([0, 1], [1.0, -1.0], 2)
 end
 
+@testset "rebalance_plan: ranks of different speed" begin
+    # equal work on both ranks, rank 1 twice as fast: rank 0 sheds one unit, then both need time 2 (2 units / speed 1, 4 units / speed 2)
+    plan = Dagger.rebalance_plan([0, 0, 0, 1, 1, 1], fill(1.0, 6), 2; speeds=[1.0, 2.0])
+    @test length(plan) == 1 && last(only(plan)) == 1
+    owners = [0, 0, 0, 1, 1, 1]; foreach(p -> owners[p.first] = p.second, plan)
+    @test count(==(0), owners) == 2
+    # already balanced for those speeds: nothing moves (the old plan would shuffle)
+    @test isempty(Dagger.rebalance_plan([0, 0, 1, 1, 1, 1], fill(1.0, 6), 2; speeds=[1.0, 2.0]))
+    # costs that are work, measured once: a second call on the result is stable (no drift back and forth)
+    @test isempty(Dagger.rebalance_plan(owners, fill(1.0, 6), 2; speeds=[1.0, 2.0]))
+    @test Dagger.rebalance_plan([0, 0, 1], [5.0, 3.0, 1.0], 2; speeds=[1.0, 1.0]) == Dagger.rebalance_plan([0, 0, 1], [5.0, 3.0, 1.0], 2)
+    @test_throws ArgumentError Dagger.rebalance_plan([0, 1], [1.0, 1.0], 2; speeds=[1.0])
+    @test_throws ArgumentError Dagger.rebalance_plan([0, 1], [1.0, 1.0], 2; speeds=[1.0, 0.0])
+end
+
 @testset "rebalance: chunks change owner, data intact, tasks follow" begin
     nr = MPI.Comm_size(comm)
     if nr >= 2
