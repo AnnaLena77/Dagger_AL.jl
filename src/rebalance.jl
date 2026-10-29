@@ -55,7 +55,11 @@ end
 measured time of the chunk's tasks in the last step, made equal on all ranks with [`allreduce_value`](@ref)). Computes [`rebalance_plan`](@ref) and
 moves each chunk that has to change owner by running `identity` on the new rank: the result is a new chunk owned by that rank, with the data copied
 over (about 0.15 s for 100 MB between two ranks of a laptop; see `LLM_info/bench/migrate_cost.jl`). Returns the chunk vector to use from now on
-(unchanged entries are the same objects) and the list of moves. The application must schedule the tasks bound to a chunk on its new owner, e.g.
+(unchanged entries are the same objects) and the list of moves. An element of `chunks` may be a `Chunk`, a `DTask` that produces one (what `DArray.chunks`
+holds before the tasks finish), or a tuple / vector of those that must move together (the buffers of one partition): the members must have the same owner,
+move as a unit, and come back as a vector in the same position. The old chunks are not freed by the call: their memory is released by the garbage collector
+once nothing refers to them, which took two full collections for a chunk no task had used and three for one that tasks had used (200 MB chunks, `bench/chunk_release.jl`);
+`Dagger.unsafe_free!` only releases libc-allocated buffers. The application must schedule the tasks bound to a chunk on its new owner, e.g.
 `Dagger.scope(mpi_rank=Dagger.owner_rank(chunk))`, and drop its references to the old chunks so their memory can be reclaimed.
 Other accelerations throw.
 """

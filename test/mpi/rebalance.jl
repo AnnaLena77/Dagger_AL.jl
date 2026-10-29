@@ -42,3 +42,29 @@ end
     end
 end
 Dagger.barrier(; comm)
+
+@testset "rebalance: groups move together, DTask elements are accepted" begin
+    nr = MPI.Comm_size(comm)
+    if nr >= 2
+        procs_by_rank = Dict(r => first(filter(p -> p.rank == r, mpi_procs())) for r in 0:nr-1)
+        mkc(owner, v) = Dagger.tochunk(fill(Float64(v), 100), procs_by_rank[owner], Dagger.memory_space(procs_by_rank[owner]))
+        P = 2 * nr
+        # a partition = (buf, meta, red), all on rank 0 at first
+        parts = [(mkc(0, i), mkc(0, 10i), mkc(0, 100i)) for i in 1:P]
+        new, moves = Dagger.rebalance(parts, fill(1.0, P))
+        @test all(g -> g isa AbstractVector && length(g) == 3, new)
+        owners = Int[Dagger.owner_rank(first(g)) for g in new]
+        @test all(g -> all(c -> Dagger.owner_rank(c) == Dagger.owner_rank(first(g)), g), new)   # a group never splits
+        @test maximum([count(==(r), owners) for r in 0:nr-1]) - minimum([count(==(r), owners) for r in 0:nr-1]) <= 1
+        sums = [[fetch(Dagger.@spawn(scope=Dagger.scope(mpi_rank=Dagger.owner_rank(c)), sum(c))) for c in g] for g in new]
+        @test sums == [[100.0i, 1000.0i, 10000.0i] for i in 1:P]
+        # DTask elements (as in DArray.chunks)
+        dts = Any[Dagger.@spawn(scope=Dagger.scope(mpi_rank=0), identity(fill(Float64(i), 100))) for i in 1:P]
+        new2, _ = Dagger.rebalance(dts, fill(1.0, P))
+        @test all(c -> c isa Dagger.Chunk, new2)
+        @test [fetch(Dagger.@spawn(scope=Dagger.scope(mpi_rank=Dagger.owner_rank(c)), sum(c))) for c in new2] == [100.0i for i in 1:P]
+        # a group whose members have different owners is refused
+        @test_throws ArgumentError Dagger.rebalance([(mkc(0, 1), mkc(1, 1))], [1.0])
+    end
+end
+Dagger.barrier(; comm)
