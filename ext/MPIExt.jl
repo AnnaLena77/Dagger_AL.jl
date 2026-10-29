@@ -3525,6 +3525,27 @@ function Dagger.loop_worker_scopes(accel::MPIAcceleration, scope::Dagger.Abstrac
     return Dagger.AbstractScope[Dagger.ExactScope(p) for p in procs]
 end
 
+# --- Moving chunks between ranks (Dagger.rebalance) -------------------------------------------------------------------------
+# A chunk's owner is part of its handle, so "moving" one means making a NEW chunk on the destination: a task scoped to that rank that
+# returns its argument (the data is copied there by the ordinary argument move). The assignment (`Dagger.rebalance_plan`) is a pure
+# function of the chunks' owners and the costs, so every rank derives the same plan and plans the same tasks.
+Dagger.owner_rank(c::Dagger.Chunk{<:Any,<:MPIRef}) = c.handle.rank
+function Dagger.rebalance(accel::MPIAcceleration, chunks::AbstractVector, costs::AbstractVector;
+                          tolerance::Real=1.05, max_moves::Integer=length(chunks))
+    comm = accel.comm
+    comm == MPI.COMM_WORLD || throw(ArgumentError("`Dagger.rebalance` works on the graph of the whole job, not on a rank-local or group graph"))
+    all(c -> c isa Dagger.Chunk{<:Any,<:MPIRef}, chunks) || throw(ArgumentError("`Dagger.rebalance` moves MPI chunks"))
+    Dagger.check_uniform(Float64[x for x in costs])
+    owners = Int[Dagger.owner_rank(c) for c in chunks]
+    plan = Dagger.rebalance_plan(owners, costs, MPI.Comm_size(comm); tolerance, max_moves)
+    out = Dagger.Chunk[c for c in chunks]
+    moves = [i => Dagger.@spawn(scope=Dagger.scope(mpi_rank=dst), identity(chunks[i])) for (i, dst) in plan]
+    for (i, t) in moves
+        out[i] = fetch(t; raw=true)       # every rank takes part, so the new chunk exists on all of them
+    end
+    return out, plan
+end
+
 # Default scope of the self-scheduling loops (`dynamic_for_async`): every processor this rank owns in the acceleration's
 # communicator. `Dagger.scope(worker=myid())`, the Distributed default, matches no MPI processor. Built once per
 # communicator (a union scope has one member per thread, lesson 94).
