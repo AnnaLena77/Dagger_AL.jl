@@ -1500,3 +1500,14 @@ lesson.
    either. Put every partition's tasks into one region, or do not use a region for
    a single writer, and look at the wall time of a multi-rank check, not only at
    whether it finishes.
+
+128. **Check that a commit loads from a clean export before you name it to anyone,
+   and remember that `git add <file>` stages every edit in that file.** I committed
+   `ext/MPIExt.jl` for a loop fix; the file also held an unrelated, unfinished
+   counter whose generic functions lived in a file I had not staged. The commit
+   failed to load on the cluster (`UndefVarError ... Error during loading of
+   extension MPIExt`), was handed to another agent as a test build, and three full
+   MPI suites were queued on it. The working tree could not show it, because the
+   missing piece was there. `git archive <rev> | tar -x -C <empty dir>` plus a
+   short run from that directory (its own test environment, two ranks) is the
+   check; `git add -p` or `git diff --cached` before the commit is the prevention.
