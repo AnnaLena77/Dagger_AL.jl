@@ -58,6 +58,14 @@
         @test all(t -> fetch(t) === nothing, ts)
         @test c[] == 50 * length(ts)
     end
+    @testset "a vector of scopes: one per worker" begin
+        n = 40
+        out = zeros(Int, n)
+        sc = [Dagger.scope(worker=myid()), Dagger.scope(worker=myid())]
+        Dagger.dynamic_for((i, o) -> (o[i] = i; nothing), n, out; workers=3, scope=sc)   # cycled over the workers
+        @test out == collect(1:n)
+        @test Dagger.dynamic_reduce((i, v) -> v[i], +, n, collect(1:n); workers=2, scope=sc) == sum(1:n)
+    end
     @testset "dynamic_reduce: fixed combination order" begin
         # floating-point sum: bitwise the same for every worker count and run, and equal to the chunked fold in order
         x = [1 / (1 + i)^1.1 * (iseven(i) ? -1 : 1) for i in 1:5000]

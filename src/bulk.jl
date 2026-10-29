@@ -26,6 +26,12 @@ function _dynamic_for_worker(next::Threads.Atomic{Int}, f, n::Int, chunk::Int, a
     return taken
 end
 
+# `scope` is one scope for all workers, or a vector with one scope per worker (cycled): under MPI a scope that covers several
+# threads does not bind a task to any of them (it may run on any free thread of the rank, lesson 120), while a scope that names
+# ONE processor does, so a vector of exact scopes pins each worker to its own thread, e.g. to keep the loop off thread 1.
+_worker_scope(scope::AbstractVector, w::Int) = scope[mod1(w, length(scope))]
+_worker_scope(scope, ::Int) = scope
+
 """
     dynamic_for_async(f, n::Integer, args...; chunk=nothing, workers=Threads.nthreads(), scope=nothing) -> Vector{DTask}
 
@@ -43,7 +49,8 @@ return at once, so asking for more workers than free threads is harmless.
 
 All workers must run in one process (they share the counter): the default scope is the
 current worker's processors; under MPI pass a scope inside one rank, e.g.
-`scope=Dagger.scope(mpi_rank=r)`. `f` must be safe to call from several threads at
+`scope=Dagger.scope(mpi_rank=r)`. `scope` may also be a vector with one scope per worker (see `_worker_scope`): a scope naming one
+processor binds its worker to that thread under MPI, a scope over several threads does not. `f` must be safe to call from several threads at
 once; the order of iterations is unspecified.
 """
 function dynamic_for_async(f, n::Integer, args...; chunk::Union{Nothing,Integer}=nothing,
@@ -54,7 +61,7 @@ function dynamic_for_async(f, n::Integer, args...; chunk::Union{Nothing,Integer}
     chunk >= 1 || throw(ArgumentError("chunk must be positive"))
     scope = scope === nothing ? local_scope() : scope
     next = Threads.Atomic{Int}(0)
-    return DTask[Dagger.@spawn(scope=scope, _dynamic_for_worker(next, f, n, chunk, args...)) for _ in 1:workers]
+    return DTask[Dagger.@spawn(scope=_worker_scope(scope, w), _dynamic_for_worker(next, f, n, chunk, args...)) for w in 1:workers]
 end
 
 """
@@ -112,8 +119,8 @@ function dynamic_reduce_async(f, op, n::Integer, args...; init=nothing, chunk::U
     scope = scope === nothing ? local_scope() : scope
     next = Threads.Atomic{Int}(0)
     parts = Vector{Any}(undef, nchunks)
-    tasks = DTask[Dagger.@spawn(scope=scope, _dynamic_reduce_worker(next, parts, f, op, n, chunk, nchunks, args...)) for _ in 1:workers]
-    return Dagger.@spawn(scope=scope, _dynamic_reduce_finish(op, parts, init, tasks...))
+    tasks = DTask[Dagger.@spawn(scope=_worker_scope(scope, w), _dynamic_reduce_worker(next, parts, f, op, n, chunk, nchunks, args...)) for w in 1:workers]
+    return Dagger.@spawn(scope=_worker_scope(scope, 1), _dynamic_reduce_finish(op, parts, init, tasks...))
 end
 # The tasks are arguments only to order this after them
 function _dynamic_reduce_finish(op, parts::Vector{Any}, init, _workers...)

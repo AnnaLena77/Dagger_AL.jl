@@ -44,3 +44,25 @@ bulk_item(i) = [i]
     @test Dagger.with_rank_local(Dagger.local_scope) isa Dagger.UnionScope
 end
 Dagger.barrier(; comm)
+
+# One scope per worker: under MPI a scope over several threads does not bind a task to one of them (it may run on any free thread
+# of the rank), a scope naming ONE processor does. A vector of exact scopes therefore pins each worker to its own thread, which is
+# how a loop is kept off the driver's thread 1.
+const bulk_seen = zeros(Int, Threads.maxthreadid())
+bulk_seen_work(i) = (bulk_seen[Threads.threadid()] += 1; t0 = time_ns(); while time_ns() - t0 < 5e6; end; nothing)
+bulk_seen_report() = copy(bulk_seen)
+@testset "Dynamic loop: one scope per worker pins the workers" begin
+    owner = MPI.Comm_size(comm) - 1
+    procs = sort(collect(Dagger.get_processors(MPIExt.MPIOSProc(comm, owner))); by=p -> p.innerProc.tid)
+    if length(procs) >= 3
+        scopes = Dagger.AbstractScope[Dagger.ExactScope(p) for p in procs[2:end]]
+        fill!(bulk_seen, 0)
+        Dagger.barrier(; comm)
+        Dagger.dynamic_for(bulk_seen_work, 60; workers=length(scopes), chunk=1, scope=scopes)
+        seen = fetch(Dagger.@spawn(scope=Dagger.scope(mpi_rank=owner), bulk_seen_report()))
+        @test seen[1] == 0                                  # never on thread 1
+        @test count(>(0), seen) == length(scopes)           # every worker on its own thread
+        @test sum(seen) == 60
+    end
+end
+Dagger.barrier(; comm)
