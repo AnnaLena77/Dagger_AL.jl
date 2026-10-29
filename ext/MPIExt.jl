@@ -3488,6 +3488,28 @@ end
 
 Dagger.with_rank_local(f) = Dagger.with_acceleration(f, mpi_rank_local_acceleration())
 
+# Default scope of the self-scheduling loops (`dynamic_for_async`): every processor this rank owns in the acceleration's
+# communicator. `Dagger.scope(worker=myid())`, the Distributed default, matches no MPI processor. Built once per
+# communicator (a union scope has one member per thread, lesson 94).
+const MPI_LOCAL_SCOPE_CACHE = LockedObject(Dict{MPI.Comm,Any}())
+function Dagger.local_scope(accel::MPIAcceleration)
+    comm = accel.comm
+    # Only a graph of ONE rank can default to "this rank": in a shared graph every rank plans the same tasks, so a scope
+    # that differs per rank would make the ranks disagree about where a task runs (and who sends its result).
+    MPI.Comm_size(comm) == 1 || throw(ArgumentError(
+        "the default scope of a self-scheduling loop is ambiguous in a graph shared by $(MPI.Comm_size(comm)) ranks; pass the same `scope=` on every rank, e.g. `Dagger.scope(mpi_rank=r)`, or run the loop inside `Dagger.with_rank_local`"))
+    sc = lock(MPI_LOCAL_SCOPE_CACHE) do cache
+        get(cache, comm, nothing)
+    end
+    sc === nothing || return sc
+    procs = collect(Dagger.get_processors(MPIOSProc(comm, MPI.Comm_rank(comm))))
+    sc = Dagger.UnionScope(Dagger.ExactScope[Dagger.ExactScope(p) for p in procs])
+    lock(MPI_LOCAL_SCOPE_CACHE) do cache
+        cache[comm] = sc
+    end
+    return sc
+end
+
 # --- Group graphs: a graph on a communicator of k ranks --------------------------------
 #
 # The one-rank communicator generalized: a task graph that only the members of a communicator plan

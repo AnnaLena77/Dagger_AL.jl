@@ -25,3 +25,22 @@ bulk_report() = (count(==(1), bulk_hits), count(>(1), bulk_hits), count(==(0), b
     @test fetch(Dagger.@spawn(scope=scope, bulk_report())) == (BULK_N, 0, 0)
 end
 Dagger.barrier(; comm)
+
+# The default scope of the loops (no `scope=`): the processors of this rank, in a graph of one rank. It used to be
+# `Dagger.scope(worker=myid())`, which matches no MPI processor ("No processors available"). In the shared graph a per-rank
+# default would make the ranks disagree about where a worker runs, so it must be an error there, not a silent default.
+bulk_item(i) = [i]
+@testset "Dynamic loop and reduce: default scope under MPI" begin
+    Dagger.barrier(; comm)
+    if MPI.Comm_size(comm) > 1
+        @test_throws ArgumentError Dagger.dynamic_for(i -> nothing, 60)
+        @test_throws ArgumentError Dagger.dynamic_reduce(bulk_item, vcat, 30; init=Int[], chunk=1)
+    end
+    r = Dagger.with_rank_local() do
+        (sum(Dagger.dynamic_for(i -> nothing, 60)),
+         Dagger.dynamic_reduce(bulk_item, vcat, 30; init=Int[], chunk=1))
+    end
+    @test r == (60, collect(1:30))
+    @test Dagger.with_rank_local(Dagger.local_scope) isa Dagger.UnionScope
+end
+Dagger.barrier(; comm)

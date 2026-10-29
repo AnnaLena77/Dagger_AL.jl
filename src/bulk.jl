@@ -1,5 +1,16 @@
 # Self-scheduling parallel loop: one scheduler entry per worker instead of one per chunk.
 
+"""
+    local_scope() -> AbstractScope
+
+The scope of all processors that belong to this process in the current acceleration: the default scope of
+[`dynamic_for_async`](@ref) and [`dynamic_reduce_async`](@ref), whose workers share one counter and so must all run in
+this process. Distributed: the worker's processors. MPI: the processors of this rank in a graph of one rank (`with_rank_local`), for which `Dagger.scope(worker=myid())` matches nothing;
+in a graph shared by several ranks it throws, because a per-rank scope would make the ranks disagree: pass `scope=Dagger.scope(mpi_rank=r)`.
+"""
+local_scope() = local_scope(current_acceleration())
+local_scope(::Acceleration) = Dagger.scope(worker=myid())
+
 # Hands out index chunks of `1:n` from the shared counter `next` until none are left
 function _dynamic_for_worker(next::Threads.Atomic{Int}, f, n::Int, chunk::Int, args...)
     taken = 0
@@ -41,7 +52,7 @@ function dynamic_for_async(f, n::Integer, args...; chunk::Union{Nothing,Integer}
     workers = max(1, min(Int(workers), n))
     chunk = Int(something(chunk, max(1, cld(n, 4 * workers))))
     chunk >= 1 || throw(ArgumentError("chunk must be positive"))
-    scope = something(scope, Dagger.scope(worker=myid()))
+    scope = scope === nothing ? local_scope() : scope
     next = Threads.Atomic{Int}(0)
     return DTask[Dagger.@spawn(scope=scope, _dynamic_for_worker(next, f, n, chunk, args...)) for _ in 1:workers]
 end
@@ -98,7 +109,7 @@ function dynamic_reduce_async(f, op, n::Integer, args...; init=nothing, chunk::U
     chunk >= 1 || throw(ArgumentError("chunk must be positive"))
     nchunks = cld(n, chunk)
     workers = max(1, min(Int(workers), nchunks))
-    scope = something(scope, Dagger.scope(worker=myid()))
+    scope = scope === nothing ? local_scope() : scope
     next = Threads.Atomic{Int}(0)
     parts = Vector{Any}(undef, nchunks)
     tasks = DTask[Dagger.@spawn(scope=scope, _dynamic_reduce_worker(next, parts, f, op, n, chunk, nchunks, args...)) for _ in 1:workers]
