@@ -372,7 +372,7 @@ Dagger.dynamic_for(f, n, args...; scope=Dagger.scope(mpi_rank=r), workers=nthrea
   seconds). `Dagger.rebalance(chunks, costs)` does the planning and the moves collectively: every rank passes the same chunks and the same non-negative cost
   per chunk (for example `Dagger.allreduce_value(+, my_costs)`); it returns the chunk vector to use from now on and the moves, and keeps chunks where they are
   when the load is within `tolerance` (default 1.05) of the mean. `Dagger.rebalance_plan(owners, costs, nranks)` is the pure, deterministic plan;
-  `Dagger.owner_rank(chunk)` the owner. Schedule the tasks bound to a chunk with `Dagger.scope(mpi_rank=Dagger.owner_rank(chunk))` and drop the old chunks.
+  `Dagger.owner_rank(chunk)` the owner. If ranks differ in speed, pass the cost as WORK and `speeds=` (one positive number per rank, ratios only): the plan then equalises `work / speed`; times measured on the rank that ran them, without `speeds`, are inflated on a slow rank and make chunks drift back and forth. Schedule the tasks bound to a chunk with `Dagger.scope(mpi_rank=Dagger.owner_rank(chunk))` and drop the old chunks.
 * *Counters.* `Dagger.traffic_stats()` / `Dagger.reset_traffic_stats!()` count the messages and bytes of the broadcast machinery (results, failures,
   metadata) this process received, sent and forwarded; `Dagger.elision_stats()` counts planned, elided and own tasks.
 
