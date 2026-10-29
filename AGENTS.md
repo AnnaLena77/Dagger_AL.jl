@@ -1527,3 +1527,13 @@ lesson.
    was none: 64 cores within 0.2 %, ECC counters 0). `ssh` to compute nodes is
    denied; `sbatch --wrap` with `-w <node>` is how to look at a node you hold no
    job on.
+
+130. **A cache keyed by aliasing identity must treat `NoAliasing` as "no identity".**
+   Every `NoAliasing()` is equal, so `aliased_object!` (the Datadeps slot cache)
+   gave the second distinct `NoAliasing` argument of a region the first one's
+   slot: with several `dynamic_reduce_async` results in flight, writer i got
+   another partition's tiles (app entry 45; wrong data, no error, and plain
+   `@spawn` consumers were fine, which pointed away from the loops). Values that
+   declare no aliasing have nothing to preserve, so they bypass the cache. When
+   a Datadeps consumer sees another argument's value, look at what the argument
+   caches key on before suspecting the transport.
