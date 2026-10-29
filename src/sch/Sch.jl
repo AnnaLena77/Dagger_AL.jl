@@ -1066,7 +1066,7 @@ concurrently across threads.
             # Bypass scope calculation if it's been done for us already
             scope = options.exec_scope
         else
-            scope = constrain(@something(options.compute_scope, options.scope, DefaultScope()),
+            scope = constrain(Dagger.localize_scope(accel, @something(options.compute_scope, options.scope, DefaultScope())),
                               @something(options.result_scope, AnyScope()))
             if scope isa InvalidScope
                 scope_ex = SchedulingException("compute_scope and result_scope are not compatible: $(scope.x), $(scope.y)")
