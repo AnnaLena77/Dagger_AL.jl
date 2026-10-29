@@ -508,6 +508,22 @@ reset_elision_stats!() = reset_elision_stats!(current_acceleration())
 reset_elision_stats!(::Acceleration) = nothing
 
 """
+    traffic_stats() -> NamedTuple or nothing
+
+(MPI) Messages and bytes this process received (`rx_*`), sent as the root of a broadcast and forwarded to tree children
+(`tx_*`) through the broadcast machinery that carries task results, failures and metadata between ranks, cumulative
+since the start or the last [`reset_traffic_stats!`](@ref). Tile moves of Datadeps copies are not counted here
+(`JULIA_DAGGER_HIER_TIMING=1` lists them per region). Read it before and after a phase to see whether a result is
+being sent to ranks that do not need it.
+"""
+traffic_stats() = traffic_stats(current_acceleration())
+traffic_stats(::Acceleration) = nothing
+
+"Reset the counters of [`traffic_stats`](@ref)."
+reset_traffic_stats!() = reset_traffic_stats!(current_acceleration())
+reset_traffic_stats!(::Acceleration) = nothing
+
+"""
     enable_delegation!(; slots=max(Threads.nthreads(:default) - 1, 1), cache_bytes=0, cache_min_bytes=64 << 10, max_bytes=typemax(Int))
 
 (MPI) Let tasks spawned with `lend=true` have their execution lent to idle ranks. Collective: every
