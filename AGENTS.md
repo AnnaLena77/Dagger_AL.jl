@@ -1511,3 +1511,19 @@ lesson.
    missing piece was there. `git archive <rev> | tar -x -C <empty dir>` plus a
    short run from that directory (its own test environment, two ranks) is the
    check; `git add -p` or `git diff --cached` before the commit is the prevention.
+
+129. **Nodes of one partition are not equally fast; map them before you believe
+   an imbalance or a regression.** A fixed single-thread loop (3e8 floating-point
+   steps, one core at a time, `LLM_info/bench/cpu_health.sh`) took 1.005 s on
+   Fulda's compute-08 and compute-10 and 1.437-1.449 s on every other node tested
+   (04, 05, 06, 07, 09, 11, 12): ~30 % faster per core, and those two are the
+   only nodes exposing a `schedutil` governor. A four-node job with one fast node
+   has a built-in imbalance of about 1.08 (max over mean), which is most of what
+   the Barnes-Hut application measured (1.10-1.16) and corrected with its own
+   rebalance. The same fact biases any A/B whose two sides ran on different
+   nodes. Compare variants inside one allocation, run a homogeneous node set when
+   the question is the runtime and not the machine, and when a rank on one node is
+   the straggler, time the node's cores before suspecting a faulty CPU (there it
+   was none: 64 cores within 0.2 %, ECC counters 0). `ssh` to compute nodes is
+   denied; `sbatch --wrap` with `-w <node>` is how to look at a node you hold no
+   job on.

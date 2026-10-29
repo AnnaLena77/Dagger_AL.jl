@@ -346,6 +346,36 @@ hooks — `Dagger.mpi_device_direct`, `Dagger.mpi_device_sync`,
 `Dagger.mpi_library_gpu_aware`, and `Dagger.mpi_remap_space` — are overridable
 per backend for advanced setups.
 
+## Self-scheduling loops, pinned workers and moving work between ranks
+
+`Dagger.dynamic_for` / `Dagger.dynamic_reduce` (and their `_async` forms) run a loop on `workers` self-scheduling tasks that share one counter, so
+they must all run in **one process**. Under MPI that means a scope inside one rank:
+
+```julia
+Dagger.dynamic_for(f, n, args...; scope=Dagger.scope(mpi_rank=r), workers=nthreads-1)
+```
+
+* *Default scope.* `Dagger.local_scope()` gives the processors of this rank in a graph of one rank (`Dagger.with_rank_local`). In a graph shared by several
+  ranks every rank must pass the same `scope=`; the default throws `ArgumentError` there, because a per-rank default would make the ranks plan the
+  same task with different scopes.
+* *Pinned workers.* A scope over several threads does **not** bind a task to any of them while free MPI threads are on (the default): the task runs on any
+  free thread of the rank, including the driver's thread 1. A scope that names **one** processor does bind. So a scope that covers several threads of one
+  rank is turned into one pinned worker per thread, in thread order, leaving thread 1 out when the rank has three or more threads
+  (`JULIA_DAGGER_AVOID_DRIVER_THREAD=0` keeps it). Pass `scope=` as a **vector of scopes** (one per worker, cycled) to choose the threads yourself.
+  Ask for `nthreads - 1` workers; one more shares a thread.
+* *Do not open a blocking `spawn_datadeps` region per partition inside a loop every rank runs over all partitions*: a rank leaves the region of partition `i`
+  only after the owner has run it, so the partitions are processed one after the other. Put the tasks of all partitions into one region (or use a plain
+  `@spawn`). The warning `Hit probable hang on recv (dest: N)` is a 10-second *wait* warning, not a deadlock detector: a run that is merely serialized prints
+  it with a `dest` that moves from rank to rank.
+* *Moving work between ranks.* A chunk's owner is part of its handle, so a move is a new chunk on the destination:
+  `new = Dagger.@spawn scope=Dagger.scope(mpi_rank=r) identity(old)` (about 0.1-0.4 s per 100 MB between nodes; the first move in a process compiles for a few
+  seconds). `Dagger.rebalance(chunks, costs)` does the planning and the moves collectively: every rank passes the same chunks and the same non-negative cost
+  per chunk (for example `Dagger.allreduce_value(+, my_costs)`); it returns the chunk vector to use from now on and the moves, and keeps chunks where they are
+  when the load is within `tolerance` (default 1.05) of the mean. `Dagger.rebalance_plan(owners, costs, nranks)` is the pure, deterministic plan;
+  `Dagger.owner_rank(chunk)` the owner. Schedule the tasks bound to a chunk with `Dagger.scope(mpi_rank=Dagger.owner_rank(chunk))` and drop the old chunks.
+* *Counters.* `Dagger.traffic_stats()` / `Dagger.reset_traffic_stats!()` count the messages and bytes of the broadcast machinery (results, failures,
+  metadata) this process received, sent and forwarded; `Dagger.elision_stats()` counts planned, elided and own tasks.
+
 ## Collecting and fetching results
 
 `collect(DA)` performs a deterministic, rank-uniform gather: it returns the full
