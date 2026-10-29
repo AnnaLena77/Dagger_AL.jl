@@ -1047,6 +1047,7 @@ concurrently across threads.
     # Lightweight placement for a task that certainly runs on a thread of this process
     # (fastpath.jl); anything it does not handle takes the general path below.
     scheduled = false
+    no_proc_diag = ""   # filled only when no processor could be chosen, to say why in the exception
     local best_loc, best_spec
     fast_cand = local_fast_candidates(state, task, options, procs, accel)
     if fast_cand !== nothing
@@ -1158,6 +1159,11 @@ concurrently across threads.
                 end
             end
         end
+        if !scheduled
+            no_proc_diag = string(" for task ", task.id, " (", sprint(show, task.f; context=:compact => true), "): ", length(sorted_procs),
+                                  " candidate processor(s) after scope ", first(sprint(show, scope; context=:compact => true), 200),
+                                  ", ", length(procs_filt), " processor(s) known to this scheduler")
+        end
         empty!(sorted_procs)
     end
 
@@ -1186,7 +1192,7 @@ concurrently across threads.
                 fire_tasks!(ctx, best_loc, [best_spec], state, restore_ready)
             end
         else
-            ex = SchedulingException("No processors available, try widening scope")
+            ex = SchedulingException("No processors available, try widening scope" * no_proc_diag)
             set_failed!(state, task; ex)
             @dagdebug task :schedule "No processors available, skipping"
             # `task` was already credited to `running_count` when it entered
