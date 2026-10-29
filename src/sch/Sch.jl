@@ -1162,7 +1162,8 @@ concurrently across threads.
         if !scheduled
             no_proc_diag = string(" for task ", task.id, " (", sprint(show, task.f; context=:compact => true), "): ", length(sorted_procs),
                                   " candidate processor(s) after scope ", first(sprint(show, scope; context=:compact => true), 200),
-                                  ", ", length(procs_filt), " processor(s) known to this scheduler")
+                                  ", ", length(procs_filt), " processor(s) known to this scheduler",
+                                  isempty(sorted_procs) ? "; a scope built for another task graph (e.g. a world rank scope used inside `with_rank_local`) names processors this graph does not have" : "")
         end
         empty!(sorted_procs)
     end
