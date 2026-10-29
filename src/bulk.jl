@@ -26,6 +26,16 @@ function _dynamic_for_worker(next::Threads.Atomic{Int}, f, n::Int, chunk::Int, a
     return taken
 end
 
+"""
+    loop_worker_scopes(scope, workers) -> scope or Vector{AbstractScope}
+
+How the workers of a self-scheduling loop are bound. A scope is a request for a set of processors; the loop's workers must not
+all be free to land on the same thread, or on the thread that runs the driver and the latency-critical tasks. Distributed: the
+scope as given (its scheduler balances). MPI: see the method in MPIExt, which pins one worker to each thread of the rank.
+"""
+loop_worker_scopes(scope, workers::Int) = loop_worker_scopes(current_acceleration(), scope, workers)
+loop_worker_scopes(::Acceleration, scope, workers::Int) = scope
+
 # `scope` is one scope for all workers, or a vector with one scope per worker (cycled): under MPI a scope that covers several
 # threads does not bind a task to any of them (it may run on any free thread of the rank, lesson 120), while a scope that names
 # ONE processor does, so a vector of exact scopes pins each worker to its own thread, e.g. to keep the loop off thread 1.
@@ -60,6 +70,7 @@ function dynamic_for_async(f, n::Integer, args...; chunk::Union{Nothing,Integer}
     chunk = Int(something(chunk, max(1, cld(n, 4 * workers))))
     chunk >= 1 || throw(ArgumentError("chunk must be positive"))
     scope = scope === nothing ? local_scope() : scope
+    scope isa AbstractVector || (scope = loop_worker_scopes(scope, workers))
     next = Threads.Atomic{Int}(0)
     return DTask[Dagger.@spawn(scope=_worker_scope(scope, w), _dynamic_for_worker(next, f, n, chunk, args...)) for w in 1:workers]
 end
@@ -117,6 +128,7 @@ function dynamic_reduce_async(f, op, n::Integer, args...; init=nothing, chunk::U
     nchunks = cld(n, chunk)
     workers = max(1, min(Int(workers), nchunks))
     scope = scope === nothing ? local_scope() : scope
+    scope isa AbstractVector || (scope = loop_worker_scopes(scope, workers))
     next = Threads.Atomic{Int}(0)
     parts = Vector{Any}(undef, nchunks)
     tasks = DTask[Dagger.@spawn(scope=_worker_scope(scope, w), _dynamic_reduce_worker(next, parts, f, op, n, chunk, nchunks, args...)) for w in 1:workers]

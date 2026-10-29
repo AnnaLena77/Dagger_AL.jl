@@ -66,3 +66,22 @@ bulk_seen_report() = copy(bulk_seen)
     end
 end
 Dagger.barrier(; comm)
+
+# A loop over a scope that covers several threads of one rank is pinned by Dagger itself (one worker per thread), and the driver
+# thread is left alone when the rank has three or more: no convoy behind tasks that are bound to thread 1.
+@testset "Dynamic loop over a rank scope keeps off the driver thread" begin
+    owner = MPI.Comm_size(comm) - 1
+    nth = length(Dagger.get_processors(MPIExt.MPIOSProc(comm, owner)))
+    if nth >= 3
+        fill!(bulk_seen, 0)
+        Dagger.barrier(; comm)
+        Dagger.dynamic_for(bulk_seen_work, 60; workers=nth - 1, chunk=1, scope=Dagger.scope(mpi_rank=owner))
+        seen = fetch(Dagger.@spawn(scope=Dagger.scope(mpi_rank=owner), bulk_seen_report()))
+        @test seen[1] == 0
+        @test count(>(0), seen) == nth - 1
+        @test sum(seen) == 60
+        r = Dagger.dynamic_reduce(i -> (bulk_seen_work(i); [i]), vcat, 40; init=Int[], chunk=1, workers=nth - 1, scope=Dagger.scope(mpi_rank=owner))
+        @test r == collect(1:40)
+    end
+end
+Dagger.barrier(; comm)

@@ -1193,6 +1193,7 @@ function recv_yield_serialized(comm, my_rank, their_rank, tag)
                 error("recv_yield failed with error $(MPI.Get_error(stat))")
             end
             count = MPI.Get_count(stat, UInt8)
+            Threads.atomic_add!(BCAST_RX_MSGS, 1); Threads.atomic_add!(BCAST_RX_BYTES, count)
             buf = Array{UInt8}(undef, count)
             req = MPI.Imrecv!(MPI.Buffer(buf), msg)
             __wait_for_request(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
@@ -1571,6 +1572,19 @@ const BCAST_RELAY_IDLE_SLEEP = 1e-4
 # for a 10s warn / 120s error timer and costs nothing when nobody is waiting.
 const BCAST_RELAY_HEARTBEAT_ITERS = 1000
 
+# Broadcast traffic of this process (see `Dagger.traffic_stats`): messages and bytes received by the relay, and sent or forwarded
+const BCAST_RX_MSGS = Threads.Atomic{Int}(0)
+const BCAST_RX_BYTES = Threads.Atomic{Int}(0)
+const BCAST_TX_MSGS = Threads.Atomic{Int}(0)
+const BCAST_TX_BYTES = Threads.Atomic{Int}(0)
+Dagger.traffic_stats(::MPIAcceleration) = (rx_msgs=BCAST_RX_MSGS[], rx_bytes=BCAST_RX_BYTES[], tx_msgs=BCAST_TX_MSGS[], tx_bytes=BCAST_TX_BYTES[])
+function Dagger.reset_traffic_stats!(::MPIAcceleration)
+    for c in (BCAST_RX_MSGS, BCAST_RX_BYTES, BCAST_TX_MSGS, BCAST_TX_BYTES)
+        Threads.atomic_xchg!(c, 0)
+    end
+    return nothing
+end
+
 # Always-running per-rank progress engine: receive a broadcast on `bcast_comm`,
 # forward the raw bytes to this rank's tree children, then deliver the payload.
 # Forwarding is NOT gated by datadeps task dispatch — that is what breaks the
@@ -1622,6 +1636,7 @@ function bcast_relay_loop(state::BcastState, spin_iters::Int=BCAST_RELAY_SPIN_IT
             __wait_for_request(req, comm, rank, src, tag, "bcast_relay", "recv")
             root, value = Serialization.deserialize(IOBuffer(buf))
             for child in bcast_tree_children(rank, Int(root), sz)
+                Threads.atomic_add!(BCAST_TX_MSGS, 1); Threads.atomic_add!(BCAST_TX_BYTES, length(buf))
                 sreq = MPI.Isend(buf, comm; dest=child, tag=tag)
                 __wait_for_request(sreq, comm, rank, child, tag, "bcast_relay", "send")
             end
@@ -1733,6 +1748,7 @@ function bcast_meta_yield(comm::MPI.Comm, root::Integer, tag, value=nothing)
         buf = bcast_serialize((Int(root), value))
         bcomm = state.bcast_comm
         for child in bcast_tree_children(rank, Int(root), sz)
+            Threads.atomic_add!(BCAST_TX_MSGS, 1); Threads.atomic_add!(BCAST_TX_BYTES, length(buf))
             req = MPI.Isend(buf, bcomm; dest=child, tag=utag)
             __wait_for_request(req, bcomm, rank, child, utag, "bcast_meta", "send")
         end
@@ -3487,6 +3503,27 @@ function mpi_rank_local_acceleration()
 end
 
 Dagger.with_rank_local(f) = Dagger.with_acceleration(f, mpi_rank_local_acceleration())
+
+# The workers of a self-scheduling loop under MPI. With free MPI threads (the default) a scope over several threads does not bind
+# a task to any of them: it runs on any free thread of the rank, the driver's thread 1 included, and a worker that lands on
+# thread 1 holds it for the whole loop while the tasks pinned there (exports, merges that other ranks wait for) cannot start.
+# A scope that names ONE processor does bind. So a scope that covers several threads of ONE rank becomes one exact scope per
+# thread, in thread order, and the driver thread is left out when the rank has three or more (`DATADEPS_AVOID_DRIVER`, the same
+# rule as uniform Datadeps planning); worker w then runs on thread w and the workers cannot pile up on one thread. A scope that is
+# already a single processor, spans several ranks, or contains anything but thread processors is passed on unchanged.
+function Dagger.loop_worker_scopes(accel::MPIAcceleration, scope::Dagger.AbstractScope, workers::Int)
+    procs = collect(Dagger.compatible_processors(accel, scope))
+    length(procs) >= 2 || return scope
+    all(p -> p isa MPIProcessor && p.innerProc isa Dagger.ThreadProc, procs) || return scope
+    first_p = first(procs)
+    all(p -> p.comm == first_p.comm && p.rank == first_p.rank && p.innerProc.owner == first_p.innerProc.owner, procs) || return scope
+    sort!(procs; by=p -> p.innerProc.tid)
+    if Dagger.DATADEPS_AVOID_DRIVER[] && length(procs) >= 3
+        filtered = filter(p -> p.innerProc.tid != 1, procs)
+        isempty(filtered) || (procs = filtered)
+    end
+    return Dagger.AbstractScope[Dagger.ExactScope(p) for p in procs]
+end
 
 # Default scope of the self-scheduling loops (`dynamic_for_async`): every processor this rank owns in the acceleration's
 # communicator. `Dagger.scope(worker=myid())`, the Distributed default, matches no MPI processor. Built once per
