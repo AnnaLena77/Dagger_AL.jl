@@ -1474,8 +1474,12 @@ lesson.
    code runs slower under one runtime than another, compare CPU seconds with useful
    seconds before looking at the code. The relay now sleeps 100 us between probes from
    the first idle iteration when it is migratable; a relay on the driver's thread (main,
-   or fewer than 4 threads) keeps the spin because it shares the thread. Forcing zero
-   spins on the driver's thread (4 ranks x 2 threads, relay forced migratable) hung the
-   delegation test in 2 of 5 runs, so the spin count depends on where the relay runs.
+   or fewer than 4 threads) keeps the spin because it shares the thread. A migratable
+   relay on only 2 default threads is unreliable with *either* spin count (4 ranks x 2
+   threads, delegation test alone, laptop: 2 of 9 runs hung with spin 0, 1 of 19 with the
+   old spin, 0 of 30 once one interactive thread was added), which is why `auto` never
+   picks it below 4 threads (lesson 124); at 4 ranks x 4 threads 0 of 40 runs hung, and
+   0 of 6 next to 10 CPU hogs. Do not blame the spin count for that hazard: I first did,
+   and one more run with the old spin refuted it.
    The same CPU-vs-kernel check applies to any future background loop (heartbeats,
    lend service, steal polling).
