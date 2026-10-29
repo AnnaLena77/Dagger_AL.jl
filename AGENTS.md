@@ -1483,3 +1483,20 @@ lesson.
    and one more run with the old spin refuted it.
    The same CPU-vs-kernel check applies to any future background loop (heartbeats,
    lend service, steal polling).
+
+127. **A blocking `spawn_datadeps` inside a loop that every rank runs over all
+   partitions serializes the partitions, and the log calls it a hang.** In the
+   SPMD graph every rank plans every task, and a region does not return before its
+   tasks are done, so a rank leaves the region of partition i only after the owner
+   of i has run it, and the owner enters it only after region i-1: 32 partitions
+   are processed one after the other. The Barnes-Hut `--walk_mode=pure` showed no
+   step for 25 minutes at 32 ranks (it was ~4 minutes per step), and every rank
+   printed `Hit probable hang on recv`, which is a 10 s *wait* warning. Told apart
+   by the `dest` of the waits: it moves from owner to owner when the run is merely
+   serialized, and stays on one rank in a real hang. Reproduced with 4 ranks and
+   slow tiles (`bench/pure_walk_shape.jl`): one region per partition 2.4 s, one
+   region around all partitions or a plain `@spawn` writer 0.6 s. A two-rank
+   check cannot see it (2x), and a test that only compares the final state cannot
+   either. Put every partition's tasks into one region, or do not use a region for
+   a single writer, and look at the wall time of a multi-rank check, not only at
+   whether it finishes.
