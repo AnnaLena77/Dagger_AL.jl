@@ -1573,3 +1573,19 @@ lesson.
    contents, and never by an address obtained from a typed immutable. The unit test
    for it passes on the old code too (the scope objects reach the planner by a
    path a unit test does not take); keep the allocation profile as the check.
+
+133. **Per-thread busy shares beat aggregate ones: a "scheduler latency" that was one thread.**
+   A shared-memory tile Cholesky (8192/256, 5984 plain `@spawn` tasks, 10 threads) ran at
+   busy 0.88-0.91 against 0.95-0.97 for plain Julia tasks, and every aggregate
+   statistic (idle with a ready task waiting 80-92 %, 95 % of tasks queued behind a
+   busy thread, ms-scale tails between completion and enqueue) pointed at placement and
+   wake-ups -- which suggested a pull queue. The per-thread split
+   (`bench/ready_wait.jl`, `RWTH` lines) showed threads 2-10 at 95-97 % busy, exactly the
+   plain-task level, and thread 1 (the submitter, 20-45 us per task for 0.13-0.2 s of a
+   0.58 s run, plus the driver's waits) at 37-52 %. Keeping kernels off thread 1 lifted busy
+   to 0.95 at the same wall (9 fast workers = 10 slow ones); handing submission to a helper
+   (`AsyncEnqueueQueue`, the driver then needed 16-20 ms instead of 130-180) did not change
+   the wall either, because the scheduler work only moved to another thread. What is left
+   is per-task CPU time in the runtime (~90 us of thread time per task: wall x threads -
+   kernel seconds, over 5984 tasks), so fewer or cheaper tasks are the lever, not queue
+   topology. Look at the per-thread table before designing a scheduler change.
