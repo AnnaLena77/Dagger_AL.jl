@@ -1554,3 +1554,22 @@ lesson.
    id is above Open MPI's `tag_ub`, so anything that uses a task id as an MPI
    tag must skip rank-local ids (`mpi_failure_tag`) -- invisible on MPICH,
    whose `tag_ub` is 2^30.
+
+132. **The `jl_value_ptr` trap of lesson 101 bit a second time, in the cache that
+   was written to avoid O(threads) hashing.** `mpi_object_address(scope)` was
+   called from `mpi_union_scope_processor(scope::UnionScope)`: with the argument
+   annotated, the compiler passes a fresh box, so every lookup used a new key and
+   every rank-scoped task recomputed its processor and canonical order (sorting
+   `short_name` strings) and copied the 256-entry table on the miss. At 4 ranks x
+   32 threads 16 rank-scoped tasks with a future argument took 9-14 ms to spawn
+   against 1-2 ms for `ExactScope` tasks, and allocated 3x as much; Barnes-Hut saw
+   the LET phase go from 0.35 s to 1.94 s at 8 nodes. What found it: an allocation
+   profile of the spawn calls (`Profile.Allocs`, `bench/rank_scope_allocs.jl`,
+   4 ranks x 16 threads on a laptop) attributed to the innermost Dagger frame --
+   `short_name` strings from `mpi_union_scope_processor` -- and the cache held several
+   entries for ONE scope object. A latency probe with plain tasks (no future
+   argument) and a sampling profile of the driver thread both showed nothing; the
+   workload shape (a DTask argument, a rank scope) mattered. Key such caches by
+   contents, and never by an address obtained from a typed immutable. The unit test
+   for it passes on the old code too (the scope objects reach the planner by a
+   path a unit test does not take); keep the allocation profile as the check.
