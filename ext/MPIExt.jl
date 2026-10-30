@@ -3477,6 +3477,26 @@ function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
 end
 
 
+function Dagger.skip_tasks!(accel::MPIAcceleration, n::Integer)
+    n >= 0 || throw(ArgumentError("cannot skip a negative number of tasks"))
+    n == 0 && return nothing
+    # Without elision the owner announces every task's result type to ALL ranks, which a rank that never planned the task
+    # cannot receive; only failure-only (elided) tasks may be skipped.
+    Dagger.ELIDE_FOREIGN_TASKS[] || throw(ArgumentError("`Dagger.skip_tasks!` needs foreign-task elision: start with JULIA_DAGGER_ELIDE_FOREIGN_TASKS=1 or call `Dagger.elide_foreign_tasks!()`"))
+    if accel.comm == MPI.COMM_WORLD
+        Threads.atomic_add!(Dagger.ID_COUNTER, n)
+    elseif accel.comm == MPI.COMM_SELF
+        Threads.atomic_add!(MPI_LOCAL_ID_COUNTER, n)
+    else
+        g = lock(MPI_GROUPS) do groups
+            get(groups, accel.comm, nothing)
+        end
+        g === nothing && error("Task ids of a group graph need the group to be registered (`Dagger.with_group`)")
+        Threads.atomic_add!(g.counter, n)
+    end
+    return nothing
+end
+
 # --- Rank-local task graphs: a graph on a communicator of size one --------------------
 #
 # Under `with_rank_local` the current acceleration is an `MPIAcceleration` over

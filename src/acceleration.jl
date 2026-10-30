@@ -113,6 +113,23 @@ nothing). Identity for every other acceleration.
 localize_scope(::Acceleration, scope) = scope
 
 """
+    skip_tasks!(n)
+
+Under MPI every rank plans every task, and a task's id (and so its MPI tags) is the next value of a counter
+that must be equal on all ranks. A rank that does not take part in a task (it neither runs it nor owns one
+of its arguments) can leave the `@spawn` out and call `skip_tasks!(1)` at that position instead (or
+`skip_tasks!(k)` for `k` consecutive foreign tasks): it advances the counter of the current task graph by
+`n` and costs a few nanoseconds against ~20 us for an elided `@spawn`, so planning a batch of `P` tasks of
+which a rank takes part in `g` costs it `g` spawns instead of `P`. Needs foreign-task elision (`JULIA_DAGGER_ELIDE_FOREIGN_TASKS=1` / `Dagger.elide_foreign_tasks!()`), which is checked. Constraints that are not checked:
+every rank must make the same sequence of `@spawn` / `skip_tasks!` calls per task position; a skipped task
+must be one that this rank would have elided (a concrete `return_type`, no `tag`, and its result is never
+used on this rank), because the rank has no placeholder for it and a failure of the task is announced to it
+without a consumer. Other accelerations have no uniform ids: a no-op.
+"""
+skip_tasks!(n::Integer) = skip_tasks!(current_acceleration(), n)
+skip_tasks!(::Acceleration, n::Integer) = nothing
+
+"""
     with_group(f, comm)
 
 Run `f` so that every task spawned in it belongs to a task graph on the communicator `comm`
