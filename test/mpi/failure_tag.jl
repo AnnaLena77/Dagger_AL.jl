@@ -19,3 +19,21 @@ f_nothing_fits() = 1
     @test occursin("f_nothing_fits", msg)
     @test occursin("0 candidate processor(s)", msg)
 end
+
+@testset "union-scope caches: equal scope objects share one entry" begin
+    ext = Base.get_extension(Dagger, :MPIExt)
+    me = MPI.Comm_rank(MPI.COMM_WORLD)
+    accel = ext.MPIAcceleration(MPI.COMM_WORLD)
+    # scopes are rebuilt or copied on the way to the planner (equal, not identical): they must not each get a cache entry
+    # (the cache used to be keyed by an address that is a fresh box per call for a statically typed immutable)
+    sc0 = Dagger.scope(mpi_rank=me)
+    ext.mpi_union_scope_processor(sc0); ext.mpi_union_scope_ordered(accel, sc0)
+    n1 = length(ext.MPI_UNION_SCOPE_CACHE.table); n2 = length(ext.MPI_UNION_ORDER_CACHE.table)
+    for _ in 1:20
+        sc = Dagger.scope(mpi_rank=me)
+        @test sc == sc0
+        ext.mpi_union_scope_processor(sc); ext.mpi_union_scope_ordered(accel, sc)
+    end
+    @test length(ext.MPI_UNION_SCOPE_CACHE.table) == n1
+    @test length(ext.MPI_UNION_ORDER_CACHE.table) == n2
+end

@@ -3106,6 +3106,19 @@ end
 # `pointer_from_objref` refuses immutable values; a `UnionScope` is one, but it is not a bits type, so it is always
 # a heap object and this is the address of that object (never of a copy)
 mpi_object_address(x) = UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), x))
+# ... but only while `x` is statically abstract: with `scope::Dagger.UnionScope` the compiler knows a concrete immutable type and
+# passes a fresh box, so the "address" differs on every call and the caches below never hit (measured: every rank-scoped task
+# recomputed its processor by sorting `short_name` strings, 75 KB and ~0.5 ms per task at 32 threads; BH entry 65). The key is
+# therefore a function of the contents (length and three members, lesson 101); `===` on a hit still confirms it.
+function mpi_union_key(scope::Dagger.UnionScope)
+    s = scope.scopes
+    n = length(s)
+    h = hash(n)
+    if n > 0
+        h = hash(s[1], h); h = hash(s[n], h); h = hash(s[(n >> 1) + 1], h)
+    end
+    return UInt(h)
+end
 
 mutable struct MPIUnionScopeCache
     @atomic table::Dict{UInt,Tuple{Any,Any}}
@@ -3114,7 +3127,7 @@ const MPI_UNION_SCOPE_CACHE = MPIUnionScopeCache(Dict{UInt,Tuple{Any,Any}}())
 const MPI_UNION_SCOPE_CACHE_LOCK = ReentrantLock()
 
 function mpi_union_scope_processor(scope::Dagger.UnionScope)
-    key = mpi_object_address(scope)
+    key = mpi_union_key(scope)
     hit = get((@atomic MPI_UNION_SCOPE_CACHE.table), key, nothing)
     hit !== nothing && hit[1] === scope && return hit[2]
     proc = nothing
@@ -3146,7 +3159,7 @@ end
 const MPI_UNION_ORDER_CACHE = MPIUnionScopeCache(Dict{UInt,Tuple{Any,Any}}())
 const MPI_UNION_ORDER_CACHE_LOCK = ReentrantLock()
 function mpi_union_scope_ordered(accel::MPIAcceleration, scope::Dagger.UnionScope)::Union{Nothing,Vector{Processor}}
-    key = mpi_object_address(scope)
+    key = mpi_union_key(scope)
     hit = get((@atomic MPI_UNION_ORDER_CACHE.table), key, nothing)
     hit !== nothing && hit[1] === scope && return hit[2]::Union{Nothing,Vector{Processor}}
     ordered = nothing
