@@ -1537,3 +1537,20 @@ lesson.
    declare no aliasing have nothing to preserve, so they bypass the cache. When
    a Datadeps consumer sees another argument's value, look at what the argument
    caches key on before suspecting the transport.
+
+131. **Task graphs share threads, not scheduling.** The shared graph and a
+   `with_rank_local` (or group) graph wrap the same Julia threads in their own
+   `MPIProcessor`s, and nothing orders one graph's tasks against the other's.
+   A compute-bound task pinned to thread 3 in the rank-local graph made a
+   trivial task pinned to thread 3 in the shared graph start 1.0 s late
+   (`bench/graph_thread_sharing.jl`). Barnes-Hut's pinned LET tasks (shared
+   graph, service threads) waited behind the rank-local loop's workers: 2.5 s
+   per step at 8 ranks x 32 threads, 2.0 s once the loops left the service
+   threads out, 1.86 s with nothing pinned. Keep long non-yielding workers off
+   threads that carry latency-critical tasks of another graph, or pin nothing.
+   Related traps found on the way: a scope built for the shared graph names
+   *world* processors, which the rank-local graph does not have ("No processors
+   available"; `localize_scope` now maps the own rank's), and a rank-local task
+   id is above Open MPI's `tag_ub`, so anything that uses a task id as an MPI
+   tag must skip rank-local ids (`mpi_failure_tag`) -- invisible on MPICH,
+   whose `tag_ub` is 2^30.
