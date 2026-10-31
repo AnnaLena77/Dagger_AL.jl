@@ -1,6 +1,7 @@
 # Dagger.skip_tasks!: a rank that does not take part in a task leaves the @spawn out; ids stay uniform (BH entry 66)
 const SKIP_SEEN = Int[]
-record_skip(k) = (push!(SKIP_SEEN, k); k)
+const SKIP_LOCK = ReentrantLock()                        # the tasks run on several threads: an unlocked push! loses entries
+record_skip(k) = (lock(SKIP_LOCK) do; push!(SKIP_SEEN, k); end; k)
 @testset "skip_tasks!: ids stay uniform when ranks skip foreign tasks" begin
     nr = MPI.Comm_size(comm); me = MPI.Comm_rank(comm)
     own_task(x) = x + 1
@@ -22,7 +23,7 @@ record_skip(k) = (push!(SKIP_SEEN, k); k)
             end
         end
         if me == 0
-            t0 = time(); while length(SKIP_SEEN) < N && time() - t0 < 30; sleep(0.01); end      # a failure-only task is not waited for by `wait`
+            t0 = time(); while (lock(() -> length(SKIP_SEEN), SKIP_LOCK)) < N && time() - t0 < 30; sleep(0.01); end      # a failure-only task is not waited for by `wait`
             @test sort(SKIP_SEEN) == collect(1:N)
         end
         # the next task of the shared counter has the same id on every rank, past the batch
