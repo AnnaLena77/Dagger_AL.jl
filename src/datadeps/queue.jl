@@ -128,16 +128,23 @@ function to_tag end
 Smallest region (in tasks) that the flat planner submits through an
 [`AsyncEnqueueQueue`](@ref), so that planning the next tasks overlaps with
 turning the previous ones into scheduler thunks (`JULIA_DAGGER_FLAT_ASYNC_MIN`
-sets it at startup, 0 = never). Without it the planner submits each task
+sets it at startup; default 256, 0 = never). Without it the planner submits each task
 itself, one after the other: planning (~70 us/task) and submission (~100+ us
-on the Fulda Opterons) then add up on one thread. Not used under uniform
-execution (see `AsyncEnqueueQueue`) or on a single thread.
+on the Fulda Opterons) then add up on one thread. Measured on Fulda (gemm 4096/128,
+32768 tasks, interleaved A/B): 102.5 -> 65.5 us/task at 32 threads (-36 %), 122.0 -> 96.4 us
+at 64 threads (-21 %); 256-tile algorithms (816-4096 tasks) 0-16 % faster, none slower.
+Not used under uniform execution (see `AsyncEnqueueQueue`) or on a single thread; regions
+below the threshold (e.g. the few-task steps of iterative solvers) stay synchronous, because
+buffered tasks cannot start before their batch is handed over.
 """
-const DATADEPS_FLAT_ASYNC_MIN = Ref(0)
+const DATADEPS_FLAT_ASYNC_MIN = Ref(256)
+# Set only by the precompile workload (src/precompile.jl): it runs on one thread, where the async path is normally skipped, and has to
+# exercise it once so that its code is in the package image instead of being compiled by the first large region of a session
+const DATADEPS_FLAT_ASYNC_FORCE = Ref(false)
 
 function distribute_tasks!(queue::DataDepsTaskQueue)
     min_tasks = DATADEPS_FLAT_ASYNC_MIN[]
-    if min_tasks > 0 && length(queue.seen_tasks) >= min_tasks && !uniform_execution() && Threads.nthreads() > 1
+    if min_tasks > 0 && length(queue.seen_tasks) >= min_tasks && !uniform_execution() && (Threads.nthreads() > 1 || DATADEPS_FLAT_ASYNC_FORCE[])
         aeq = AsyncEnqueueQueue(queue.upper_queue, ReentrantLock())
         aqueue = DataDepsTaskQueue(aeq; scheduler=queue.scheduler)
         append!(aqueue.seen_tasks, queue.seen_tasks)
