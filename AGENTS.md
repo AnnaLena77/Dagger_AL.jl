@@ -1589,3 +1589,19 @@ lesson.
    is per-task CPU time in the runtime (~90 us of thread time per task: wall x threads -
    kernel seconds, over 5984 tasks), so fewer or cheaper tasks are the lever, not queue
    topology. Look at the per-thread table before designing a scheduler change.
+
+134. **Profile the real hardware before choosing the optimisation, and rule
+   things out in writing.** Three plausible per-task levers were measured and
+   dropped or shrunk this round: MemPool result registration costs 0.13-0.36 us
+   per result (a deep rewrite would have bought a few percent); locks are 2.6-3.4 %
+   of all samples on Fulda at 64 threads, so the 64-thread slowdown is not lock
+   contention; lock-free processor-state tables gave -4.5 % at 32 threads and
+   nothing measurable at 64. What the profile did show: 89-95 % of the thread time
+   of a Datadeps gemm 4096/128 is waiting for work, so the *serial planner* sets
+   the pace (~100-125 us/task on Fulda, ~27 us on a laptop), and time grows with
+   the task count, not with the flops (tile sweep: 32768 tasks 4.05 s, 4096 tasks
+   0.62 s, 512 tasks 0.47 s). Check the task count against the wall time first
+   (`bench/ss/ss_nb.sbatch`); a laptop A/B cannot see effects of 64-thread cache
+   traffic, an interleaved ABBA on the target node can (`bench/ss/ss_tcab.sbatch`).
+   A profile on a Fulda node needs `lowercase(path)` when matching Dagger frames
+   (the export lives in `/data/dagger-<name>/`).
