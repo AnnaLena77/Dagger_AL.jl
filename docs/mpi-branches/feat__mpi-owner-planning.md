@@ -41,3 +41,13 @@ TileFlow (`tf!(sp, f, TIn(id), TRW(id))`) implements the design for whole tiles:
 * **Correct** for Cholesky, LU (no pivoting), GEMM and a Jacobi stencil against sequential references (errors 7e-18 .. 4e-16) on 1, 2, 4 ranks locally and on 2 and 4 Fulda nodes with 1 and 2 ranks per node (up to 8 ranks, real network transfers).
 * **Cholesky 8192/256, one Fulda node, round 1** (TileFlow vs the current Dagger MPI path, same allocation): 1 x 64 1.42-1.51 vs 1.33-1.57 s; 2 x 32 1.05-1.48 vs 1.53-1.60 s; 4 x 16 1.43-2.06 vs 1.75-1.95 s.
 * **Walk time** (all ranks walk all tasks): 0.04 s at 1 x 64 and 2 x 32; 0.3 s at 4 x 16 was garbage collection of the receive buffers allocated in the walker (AGENTS.md lesson 138); a buffer pool removes it.
+
+### Measured A/B, one Fulda node, Cholesky 8192/256 (job 9789: 3 rounds x 3 TileFlow repetitions vs 5 Dagger repetitions, same allocation, pooled buffers)
+
+| layout | TileFlow min / median / max (n=9) | Dagger MPI min / median / max (n=15) |
+|---|---|---|
+| 1 x 64 | 1.02 / 1.43 / 1.47 s | 1.27 / 1.50 / 1.58 s |
+| 2 x 32 | 0.97 / 1.10 / 1.39 s | 1.42 / 1.55 / 1.77 s |
+| 4 x 16 | 1.20 / 1.61 / 2.03 s | 1.67 / 1.80 / 1.99 s |
+
+Equal at 1 x 64, 29 % faster at 2 x 32, 11 % at 4 x 16 (medians). Whole tiles only; the first repetition of each process includes the cold buffer pool. Across nodes (round 1 of job 9790, 8192/256): 2 x 1 x 64 TileFlow 0.89-1.18 s vs Dagger 1.28-1.36 s; 4 x 1 x 64 1.00-1.55 s vs 1.72-1.85 s; Dagger's own path gets slower with more nodes. At 16384/512 the Dagger path fails (`BUGS.md` B26).
