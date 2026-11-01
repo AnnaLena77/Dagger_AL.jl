@@ -102,6 +102,7 @@ include("sch/Sch.jl"); using .Sch
 include("tochunk.jl")
 include("bulk.jl")
 include("rebalance.jl")
+include("microtask.jl")
 include("numa.jl")
 
 # Data dependency task queue
