@@ -1750,14 +1750,19 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
                 end
             end
         finally
+            tfl = HIER_TIMING[] ? time_ns() : UInt64(0)
             maybe_flush_batch!(submit_queue)
+            tcl = HIER_TIMING[] ? time_ns() : UInt64(0)
             close_submitter!(submit_queue)
+            if HIER_TIMING[]
+                DD_FLUSH_NS[] = Int(tcl - tfl); DD_CLOSE_NS[] = Int(time_ns() - tcl)
+            end
         end
     end
 
     if HIER_TIMING[] && DD_TASKS[] > 0
         n = DD_TASKS[]
-        @info "distribute_task! sections ($n tasks): " * join(("$(DD_SECTIONS[i]) $(round(DD_PT[i] / n / 1e3; digits=1)) us" for i in 1:8), ", ") * " (per task; total $(round(sum(DD_PT) / 1e6; digits=1)) ms)"
+        @info "distribute_task! sections ($n tasks): " * join(("$(DD_SECTIONS[i]) $(round(DD_PT[i] / n / 1e3; digits=1)) us" for i in 1:8), ", ") * " (per task; total $(round(sum(DD_PT) / 1e6; digits=1)) ms); final flush $(round(DD_FLUSH_NS[] / 1e6; digits=1)) ms, close_submitter! (waits for the submitter) $(round(DD_CLOSE_NS[] / 1e6; digits=1)) ms"
     end
 
     return DataDepsState[shared_state]

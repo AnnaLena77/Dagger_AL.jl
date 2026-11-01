@@ -342,6 +342,8 @@ end
 const DD_SECTIONS = ("schedule", "scope", "populate", "history", "copy-to", "syncdeps", "spec+enqueue", "track")
 const DD_PT = zeros(Int, 8)
 const DD_TASKS = Ref(0)
+const DD_FLUSH_NS = Ref(0)     # final maybe_flush_batch! / close_submitter! of the sequential Phase 4 (close waits for the submitter to drain)
+const DD_CLOSE_NS = Ref(0)
 @inline dd_t0(timing::Bool) = timing ? time_ns() : UInt64(0)
 @inline dd_acc(timing::Bool, i::Int, t0::UInt64) = (timing && (@inbounds DD_PT[i] += Int(time_ns() - t0)); nothing)
 
