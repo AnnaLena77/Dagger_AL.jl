@@ -1647,3 +1647,22 @@ lesson.
    (`eager.jl`) spins on `yield()` (lesson 12) and starves the `Threads.@spawn`
    it waits for. `light_to_dtask` therefore waits in the caller and spawns
    `identity(value)`. Test thread-count-sensitive designs at `-t 1` and `-t 2`.
+
+137. **A job that "shows nothing" may only be buffered; look at the process list
+   before cancelling.** `mpiexec ... | strings | grep` prints nothing until the
+   run ends, because `strings` buffers. Three healthy Fulda jobs (a single-node
+   A/B, a multi-node run, a diagnosis run) looked hung for minutes and were
+   cancelled; one of them had in fact already finished a measurement. The
+   ~100 % CPU on every rank was Julia's single-threaded compilation of the warm-up
+   on a slow Opteron, not a spin. Use `grep -a --line-buffered` (no `strings`),
+   write raw output to a file, and tell a hang from a slow start by the number of
+   busy threads and the log's age; a watchdog on an interactive thread
+   (`TF_WATCHDOG`, `jl_print_task_backtraces`) is the check that costs one job.
+
+138. **Allocation in the walker thread shows up as garbage-collection time in the
+   walk.** TileFlow's walk over 5984 Cholesky tasks took 0.04 s at 2 x 32 and
+   0.3 s at 4 x 16: the receive buffers (512 KB per 256 x 256 tile) were allocated
+   in the walker, and the collections they triggered took 0.61 s of a 0.66 s walk
+   (0.22 of 0.28 on the next repetition, 0 once the heap had grown). Phase timers
+   plus `Base.GC_Diff` around the section found it in one job. A free-list of
+   buffers released when the tile is rewritten and its readers are done removes it.

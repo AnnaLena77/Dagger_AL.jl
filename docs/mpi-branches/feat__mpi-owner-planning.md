@@ -34,3 +34,10 @@ Local branch only until validated; never push to the PR head `fix/mpi-rank-local
 * The limit P x T <= E x d with E = 28 M/s: **~280 threads for 10 us tasks, ~28000 for 1 ms, ~140000 for 5 ms tiles.** The earlier estimate (0.3 us/task) was 8x too pessimistic on Fulda.
 * For comparison: planning costs ~100-125 us per task today (3000x more), a foreign task ~19-24 us.
 * **Caveat:** this is the floor of the walk itself. A real front-end (argument handling, closure, DTask/Chunk references) for tasks a rank does not own must also be skipped or kept at ~tens of ns; otherwise the front-end, not the walk, is the limit. That is the first thing the prototype has to show.
+
+## Prototype status (2026-11-01, `LLM_info/bench/tileflow/`, benchmark-only)
+
+TileFlow (`tf!(sp, f, TIn(id), TRW(id))`) implements the design for whole tiles: replicated version/holder table, owner = rank of the first written tile, deterministic transfers (sender = lowest holder, per-pair sequence tags), own tasks as `@light` tasks, one progress task polling MPI requests.
+* **Correct** for Cholesky, LU (no pivoting), GEMM and a Jacobi stencil against sequential references (errors 7e-18 .. 4e-16) on 1, 2, 4 ranks locally and on 2 and 4 Fulda nodes with 1 and 2 ranks per node (up to 8 ranks, real network transfers).
+* **Cholesky 8192/256, one Fulda node, round 1** (TileFlow vs the current Dagger MPI path, same allocation): 1 x 64 1.42-1.51 vs 1.33-1.57 s; 2 x 32 1.05-1.48 vs 1.53-1.60 s; 4 x 16 1.43-2.06 vs 1.75-1.95 s.
+* **Walk time** (all ranks walk all tasks): 0.04 s at 1 x 64 and 2 x 32; 0.3 s at 4 x 16 was garbage collection of the receive buffers allocated in the walker (AGENTS.md lesson 138); a buffer pool removes it.
