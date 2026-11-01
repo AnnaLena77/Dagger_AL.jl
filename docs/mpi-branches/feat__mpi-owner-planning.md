@@ -26,3 +26,11 @@ Benchmark-only prototype under `LLM_info/bench/` (nothing in `src/`): tiled Chol
 ## Rules
 
 Local branch only until validated; never push to the PR head `fix/mpi-rank-local-tasks`.
+
+## Measured: the replicated walk is cheap (2026-11-01)
+
+`LLM_info/bench/enum_rate.jl` (single process, no Dagger/MPI) walks a whole tiled-Cholesky task stream with the minimum owner-computes bookkeeping (owner of the output tile, holder bitmask per tile, version bump on write, transfer counted when the owner lacks the current version).
+* **Laptop 2.0 ns/task, Fulda (compute-09) 36 ns/task = 28 M tasks/s**, independent of the problem size (6k to 2.8 M tasks) and of the rank count (1 to 16). Transfers stay small (nt=32: 496 / 992 / 2792 for 2 / 4 / 16 ranks over 5984 tasks).
+* The limit P x T <= E x d with E = 28 M/s: **~280 threads for 10 us tasks, ~28000 for 1 ms, ~140000 for 5 ms tiles.** The earlier estimate (0.3 us/task) was 8x too pessimistic on Fulda.
+* For comparison: planning costs ~100-125 us per task today (3000x more), a foreign task ~19-24 us.
+* **Caveat:** this is the floor of the walk itself. A real front-end (argument handling, closure, DTask/Chunk references) for tasks a rank does not own must also be skipped or kept at ~tens of ns; otherwise the front-end, not the walk, is the limit. That is the first thing the prototype has to show.
