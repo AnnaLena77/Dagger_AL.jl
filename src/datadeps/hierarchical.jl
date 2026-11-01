@@ -1633,6 +1633,7 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
                                          value_dep_verts::Set{Int},
                                          task_metas::Vector{HierarchicalTaskMeta})
     n_partitions = length(partitions)
+    HIER_TIMING[] && (fill!(DD_PT, 0); DD_TASKS[] = 0)
     temp_queues = Vector{DataDepsTaskQueue}(undef, n_partitions)
     local_scopes = Vector{AbstractScope}(undef, n_partitions)
     proc_to_scope_lfus = [BasicLFUCache{Processor,AbstractScope}(1024) for _ in 1:n_partitions]
@@ -1752,6 +1753,11 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
             maybe_flush_batch!(submit_queue)
             close_submitter!(submit_queue)
         end
+    end
+
+    if HIER_TIMING[] && DD_TASKS[] > 0
+        n = DD_TASKS[]
+        @info "distribute_task! sections ($n tasks): " * join(("$(DD_SECTIONS[i]) $(round(DD_PT[i] / n / 1e3; digits=1)) us" for i in 1:8), ", ") * " (per task; total $(round(sum(DD_PT) / 1e6; digits=1)) ms)"
     end
 
     return DataDepsState[shared_state]
