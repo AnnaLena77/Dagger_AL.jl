@@ -1,0 +1,117 @@
+# Shared body of the TileFlow tests: runs in one process (test/tileflow.jl) and under MPI (test/mpi/tileflow.jl, 2 and 4 ranks).
+# Every rank builds the same problem from the same seed, runs the tile algorithm, gathers the result on rank 0 and compares it with LinearAlgebra.
+using Dagger, LinearAlgebra, Random, Test
+
+tf_id(nt, i, j) = (j - 1) * nt + i
+tf_cyclic(nt, np) = begin
+    pr = floor(Int, sqrt(np)); while np % pr != 0; pr -= 1; end; pc = np ÷ pr
+    id -> (i = (id - 1) % nt + 1; j = (id - 1) ÷ nt + 1; mod(i - 1, pr) * pc + mod(j - 1, pc))
+end
+tf_block(M, nb, i, j) = M[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb]
+
+function tf_cholesky!(sp, nt)
+    for k in 1:nt
+        Dagger.tile_spawn!(sp, A -> LAPACK.potrf!('L', A), Dagger.TileRW(tf_id(nt, k, k)))
+        for m in k+1:nt
+            Dagger.tile_spawn!(sp, (L, A) -> BLAS.trsm!('R', 'L', 'T', 'N', 1.0, L, A), Dagger.TileIn(tf_id(nt, k, k)), Dagger.TileRW(tf_id(nt, m, k)))
+        end
+        for n in k+1:nt
+            Dagger.tile_spawn!(sp, (A, C) -> BLAS.syrk!('L', 'N', -1.0, A, 1.0, C), Dagger.TileIn(tf_id(nt, n, k)), Dagger.TileRW(tf_id(nt, n, n)))
+            for m in n+1:nt
+                Dagger.tile_spawn!(sp, (A, B, C) -> BLAS.gemm!('N', 'T', -1.0, A, B, 1.0, C),
+                                   Dagger.TileIn(tf_id(nt, m, k)), Dagger.TileIn(tf_id(nt, n, k)), Dagger.TileRW(tf_id(nt, m, n)))
+            end
+        end
+    end
+end
+function tf_lu!(sp, nt)      # no pivoting: diagonally dominant input
+    for k in 1:nt
+        Dagger.tile_spawn!(sp, A -> (lu!(A, NoPivot()); nothing), Dagger.TileRW(tf_id(nt, k, k)))
+        for j in k+1:nt
+            Dagger.tile_spawn!(sp, (D, A) -> BLAS.trsm!('L', 'L', 'N', 'U', 1.0, D, A), Dagger.TileIn(tf_id(nt, k, k)), Dagger.TileRW(tf_id(nt, k, j)))
+        end
+        for i in k+1:nt
+            Dagger.tile_spawn!(sp, (D, A) -> BLAS.trsm!('R', 'U', 'N', 'N', 1.0, D, A), Dagger.TileIn(tf_id(nt, k, k)), Dagger.TileRW(tf_id(nt, i, k)))
+        end
+        for i in k+1:nt, j in k+1:nt
+            Dagger.tile_spawn!(sp, (L, U, C) -> BLAS.gemm!('N', 'N', -1.0, L, U, 1.0, C),
+                               Dagger.TileIn(tf_id(nt, i, k)), Dagger.TileIn(tf_id(nt, k, j)), Dagger.TileRW(tf_id(nt, i, j)))
+        end
+    end
+end
+function tf_gemm!(sp, nt)    # C = A*B; ids: A 1.., B nt^2+1.., C 2nt^2+1..
+    n2 = nt * nt
+    for i in 1:nt, j in 1:nt, k in 1:nt
+        Dagger.tile_spawn!(sp, (A, B, C) -> BLAS.gemm!('N', 'N', 1.0, A, B, 1.0, C),
+                           Dagger.TileIn(tf_id(nt, i, k)), Dagger.TileIn(n2 + tf_id(nt, k, j)), Dagger.TileRW(2n2 + tf_id(nt, i, j)))
+    end
+end
+# a chain of tasks on ONE tile that hops between the ranks (every step is a transfer)
+tf_pingpong!(sp, steps, np) = for s in 1:steps; Dagger.tile_spawn!(sp, A -> (A[1] += 1.0; nothing), Dagger.TileRW(1); at = s % np); end
+
+# bring tiles `ids` to rank 0 and return them there (nothing elsewhere)
+function tf_gather(sp, ids, me)
+    for id in ids; Dagger.tile_spawn!(sp, A -> nothing, Dagger.TileIn(id); at = 0); end
+    Dagger.tile_sync!(sp)
+    me == 0 || return nothing
+    return Dict(id => copy(Dagger.tile_data(sp, id)) for id in ids)
+end
+function tf_assemble(d, nt, nb, off)
+    M = zeros(nt * nb, nt * nb)
+    for i in 1:nt, j in 1:nt; M[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] = d[off + tf_id(nt, i, j)]; end
+    return M
+end
+
+function tileflow_checks(me::Int, np::Int)
+    nt, nb = 6, 24; n = nt * nb
+    ctile(M) = id -> tf_block(M, nb, (id - 1) % nt + 1, (id - 1) ÷ nt + 1)
+    @testset "Cholesky" begin
+        Random.seed!(42); X = rand(n, n); M = (X + X') / 2 + n * I
+        sp = Dagger.TileSpace(nt^2, tf_cyclic(nt, np), id -> (nb, nb), ctile(M))
+        tf_cholesky!(sp, nt)
+        d = tf_gather(sp, collect(1:nt^2), me)
+        if me == 0
+            @test norm(tril(tf_assemble(d, nt, nb, 0)) - cholesky(Symmetric(M, :L)).L) / norm(M) < 1e-12
+        end
+        st = Dagger.tile_stats(sp); @test st.tasks == 56 + nt^2     # the gather tasks count too
+        np > 1 && @test st.transfers > 0
+    end
+    @testset "LU (no pivoting)" begin
+        Random.seed!(43); M = rand(n, n) + n * I
+        sp = Dagger.TileSpace(nt^2, tf_cyclic(nt, np), id -> (nb, nb), ctile(M))
+        tf_lu!(sp, nt)
+        d = tf_gather(sp, collect(1:nt^2), me)
+        if me == 0
+            F = lu(M, NoPivot())
+            @test norm(tf_assemble(d, nt, nb, 0) - (F.L + F.U - I)) / norm(M) < 1e-12
+        end
+    end
+    @testset "GEMM" begin
+        Random.seed!(44); A = rand(n, n); B = rand(n, n)
+        init = id -> begin
+            blk = (id - 1) ÷ nt^2; t = (id - 1) % nt^2 + 1; i = (t - 1) % nt + 1; j = (t - 1) ÷ nt + 1
+            blk == 0 ? tf_block(A, nb, i, j) : blk == 1 ? tf_block(B, nb, i, j) : zeros(nb, nb)
+        end
+        own = id -> tf_cyclic(nt, np)((id - 1) % nt^2 + 1)
+        sp = Dagger.TileSpace(3nt^2, own, id -> (nb, nb), init)
+        tf_gemm!(sp, nt)
+        d = tf_gather(sp, collect(2nt^2+1:3nt^2), me)
+        me == 0 && @test norm(tf_assemble(d, nt, nb, 2nt^2) - A * B) / norm(A * B) < 1e-12
+    end
+    @testset "ping-pong chain (one transfer per step, write-after-read, pool reuse)" begin
+        steps = 40
+        sp = Dagger.TileSpace(1, id -> 0, id -> (8, 8), id -> zeros(8, 8))
+        tf_pingpong!(sp, steps, np)
+        d = tf_gather(sp, [1], me)
+        me == 0 && @test d[1][1] == steps
+    end
+    @testset "a failing kernel surfaces at tile_sync!" begin
+        sp = Dagger.TileSpace(2, id -> 0, id -> (4, 4), id -> zeros(4, 4))
+        Dagger.tile_spawn!(sp, A -> error("tile kernel boom"), Dagger.TileRW(1))
+        if me == 0
+            @test_throws Exception Dagger.tile_sync!(sp)
+        else
+            @test Dagger.tile_sync!(sp) === nothing
+        end
+    end
+end

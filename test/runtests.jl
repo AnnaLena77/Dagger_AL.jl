@@ -25,6 +25,7 @@ tests = [
     ("Two-choices Placement", "two-choices.jl"),
     ("Local Fast Path", "local-fastpath.jl"),
     ("Light Tasks", "microtask.jl"),
+    ("TileFlow", "tileflow.jl"),
     ("Dynamic Loop", "bulk.jl"),
     ("NUMA Map", "numa.jl"),
     ("Processor Grids", "procgrid.jl"),
