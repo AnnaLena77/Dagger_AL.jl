@@ -22,6 +22,11 @@ struct LightFailed
     ex::Any
 end
 
+"A dependency of a light task whose *failure is ignored*: the task waits for it but runs even if it failed (used to keep a transfer going)."
+struct LightAfter
+    t::Any
+end
+
 mutable struct LightTask
     f::Any
     args::Any
@@ -54,6 +59,7 @@ end
 @inline _light_resolve(x) = x
 @inline _light_resolve(x::LightTask) = @atomic :acquire x.result
 @inline _light_resolve(x::DTask) = fetch(x)
+@inline _light_resolve(x::LightAfter) = nothing
 
 function _light_run!(t::LightTask)
     args = t.args
@@ -102,12 +108,14 @@ Run `f(args...)` as a light task once all `LightTask`/`DTask` arguments are done
 function light_spawn(f, args...)
     k = 0
     for a in args
-        (a isa LightTask || a isa DTask) && (k += 1)
+        (a isa LightTask || a isa DTask || (a isa LightAfter && a.t isa LightTask)) && (k += 1)
     end
     t = LightTask(f, args, 1 + k)
     for a in args
         if a isa LightTask
             light_add_dependent!(a, t) || (@atomic :acquire_release t.left -= 1)   # cannot reach 0: the guard is held
+        elseif a isa LightAfter && a.t isa LightTask
+            light_add_dependent!(a.t, t) || (@atomic :acquire_release t.left -= 1)
         elseif a isa DTask
             Threads.@spawn _light_wait_dtask(a, t)
         end

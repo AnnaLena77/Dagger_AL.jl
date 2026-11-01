@@ -105,13 +105,23 @@ function tileflow_checks(me::Int, np::Int)
         d = tf_gather(sp, [1], me)
         me == 0 && @test d[1][1] == steps
     end
-    @testset "a failing kernel surfaces at tile_sync!" begin
-        sp = Dagger.TileSpace(2, id -> 0, id -> (4, 4), id -> zeros(4, 4))
+    @testset "a failing kernel surfaces at tile_sync! on every rank and nobody hangs" begin
+        # tile 1 is written on rank 0 by a kernel that fails; tile 2 (rank np-1) then READS tile 1: its receive must still be satisfied
+        sp = Dagger.TileSpace(2, id -> id == 1 ? 0 : np - 1, id -> (4, 4), id -> zeros(4, 4))
         Dagger.tile_spawn!(sp, A -> error("tile kernel boom"), Dagger.TileRW(1))
-        if me == 0
-            @test_throws Exception Dagger.tile_sync!(sp)
-        else
-            @test Dagger.tile_sync!(sp) === nothing
+        Dagger.tile_spawn!(sp, (A, B) -> (B .+= 1; nothing), Dagger.TileIn(1), Dagger.TileRW(2))
+        @test_throws Exception Dagger.tile_sync!(sp)          # rank 0: its own error; the others: "a task failed on another rank"
+        # the space is still usable for a fresh run afterwards
+        sp2 = Dagger.TileSpace(1, id -> 0, id -> (2, 2), id -> zeros(2, 2))
+        Dagger.tile_spawn!(sp2, A -> (A[1] = 5.0; nothing), Dagger.TileRW(1))
+        @test Dagger.tile_sync!(sp2) === nothing
+    end
+    @testset "element types: Float32 and ComplexF64 tiles" begin
+        for T in (Float32, ComplexF64)
+            sp = Dagger.TileSpace(2, id -> id == 1 ? 0 : np - 1, id -> (3, 3), id -> fill(T(id), 3, 3); T)
+            Dagger.tile_spawn!(sp, (A, B) -> (B .+= A; nothing), Dagger.TileIn(1), Dagger.TileRW(2))
+            d = tf_gather(sp, [2], me)
+            me == 0 && @test all(==(T(3)), d[2])
         end
     end
 end

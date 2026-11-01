@@ -45,10 +45,11 @@ mutable struct TileSpace
     tiles::Vector{Union{Nothing,LocalTile}}
     own::Function                       # id -> rank that owns the data initially
     tsize::Function                     # id -> (m, n) of the tile (needed to allocate receive buffers)
+    T::DataType                         # element type of every tile (an isbits type, so that tiles are plain buffers)
     pairseq::Vector{Int}                # np*np sequence numbers of transfers per (sender, dest)
     ntasks::Int; nown::Int; nxfer::Int; nsent::Int; nrecv::Int
     all_tasks::Vector{Any}
-    pool::Dict{Tuple{Int,Int},Vector{Matrix{Float64}}}
+    pool::Dict{Tuple{Int,Int},Vector{Matrix}}
     pool_lock::ReentrantLock
 end
 
@@ -59,11 +60,12 @@ A set of `ntiles` tiles identified by `1:ntiles`.  `own(id)` is the rank that in
 matrices), `init(id)` creates it (called on the owner, from many threads: first touch of the memory should be spread over the machine).
 Every rank must build the same space and make the same `tile_spawn!` calls in the same order.
 """
-function TileSpace(ntiles::Int, own::Function, tsize::Function, init::Function; transport::TileTransport=tile_transport(current_acceleration()))
+function TileSpace(ntiles::Int, own::Function, tsize::Function, init::Function; T::DataType=Float64, transport::TileTransport=tile_transport(current_acceleration()))
+    isbitstype(T) || throw(ArgumentError("TileSpace needs an isbits element type, got $T"))
     me = tile_rank(transport); np = tile_nranks(transport)
     np <= 64 || throw(ArgumentError("TileSpace supports at most 64 ranks (holder bitmask)"))
     sp = TileSpace(transport, me, np, fill(UInt64(0), ntiles), zeros(Int32, ntiles), Vector{Union{Nothing,LocalTile}}(nothing, ntiles),
-                   own, tsize, zeros(Int, np * np), 0, 0, 0, 0, 0, Any[], Dict{Tuple{Int,Int},Vector{Matrix{Float64}}}(), ReentrantLock())
+                   own, tsize, T, zeros(Int, np * np), 0, 0, 0, 0, 0, Any[], Dict{Tuple{Int,Int},Vector{Matrix}}(), ReentrantLock())
     mine = Int[]
     for id in 1:ntiles
         o = own(id); (0 <= o < np) || throw(ArgumentError("own($id) = $o is not a rank of 0:$(np-1)"))
@@ -82,20 +84,22 @@ end
 function _pool_take(sp::TileSpace, m, n)
     lock(sp.pool_lock) do
         v = get(sp.pool, (m, n), nothing)
-        (v !== nothing && !isempty(v)) ? pop!(v) : Matrix{Float64}(undef, m, n)
+        (v !== nothing && !isempty(v)) ? pop!(v) : Matrix{sp.T}(undef, m, n)
     end
 end
-function _pool_give(sp::TileSpace, a::Matrix{Float64})
+function _pool_give(sp::TileSpace, a::Matrix)
     lock(sp.pool_lock) do
-        push!(get!(Vector{Matrix{Float64}}, sp.pool, size(a)), a)
+        push!(get!(Vector{Matrix}, sp.pool, size(a)), a)
     end
     return nothing
 end
 
-struct _TileRelease; sp::TileSpace; arr::Matrix{Float64}; end
+struct _TileRelease; sp::TileSpace; arr::Matrix; end
 (r::_TileRelease)(deps...) = _pool_give(r.sp, r.arr)
 struct _TileRunner; f::Any; arrs::Vector{Any}; end
 (g::_TileRunner)(deps...) = (g.f(g.arrs...); nothing)
+# A send goes out even when the task that produced the tile failed (`LightAfter`): the receiving rank is already waiting for it, and a rank that
+# never gets its tile would hang the whole run instead of failing it. The error is agreed on in `tile_sync!`.
 _tile_send(tr, arr, dest, tag, ready...) = (wait(tile_post_send(tr, arr, dest, tag)); nothing)
 _tile_wait(ev) = (wait(ev); nothing)
 
@@ -128,7 +132,7 @@ function tile_spawn!(sp::TileSpace, f, args::Union{TileIn,TileRW}...; at::Union{
             sp.nxfer += 1
             if me == sender
                 t = sp.tiles[id]::LocalTile
-                st = light_spawn(_tile_send, sp.tr, t.arr, r, tag, t.ready)
+                st = light_spawn(_tile_send, sp.tr, t.arr, r, tag, t.ready === nothing ? nothing : LightAfter(t.ready))
                 push!(t.readers, st); push!(sp.all_tasks, st); sp.nsent += 1
             elseif me == r
                 m, n = sp.tsize(id)
@@ -177,10 +181,13 @@ function tile_spawn!(sp::TileSpace, f, args::Union{TileIn,TileRW}...; at::Union{
     return nothing
 end
 
-"Wait for everything this rank started (errors of the tasks are rethrown), then a cooperative barrier over all ranks."
+"""
+    tile_sync!(space)
+
+Wait for everything this rank started, then agree with the other ranks on whether any kernel failed anywhere: the barrier is reached on every rank
+even when a kernel failed here, the first local error is rethrown, and a rank that saw no error of its own still throws when another rank did.
+"""
 function tile_sync!(sp::TileSpace)
-    # The barrier must be reached on every rank even when a kernel failed here, or the other ranks wait for it forever: remember the first
-    # error, pass the barrier, then throw.
     err = nothing
     for t in sp.all_tasks
         try
@@ -191,8 +198,40 @@ function tile_sync!(sp::TileSpace)
     end
     empty!(sp.all_tasks)
     tile_barrier(sp.tr)
+    anyfail = tile_allreduce_max(sp.tr, err === nothing ? 0 : 1)
     err === nothing || throw(err)
+    anyfail == 0 || error("TileFlow: a task failed on another rank")
     return nothing
+end
+
+"`tile_allreduce_max(tr, x::Int)`: the maximum of `x` over all ranks (cooperative; every rank must call it)."
+tile_allreduce_max(::LocalTileTransport, x::Int) = x
+"""
+Generic allreduce on the tile send/receive primitives: everybody sends its value to rank 0, rank 0 sends the maximum back (tags above `TAG_MOD`,
+so they never meet a tile transfer).
+"""
+function tile_allreduce_max(tr::TileTransport, x::Int)
+    me = tile_rank(tr); np = tile_nranks(tr)
+    np == 1 && return x
+    tag = TAG_MOD + 1000
+    buf = [Float64(x)]
+    if me == 0
+        m = x
+        bufs = [zeros(1) for _ in 1:np-1]
+        evs = [tile_post_recv(tr, bufs[r], r, tag) for r in 1:np-1]
+        for ev in evs; wait(ev); end
+        for b in bufs; m = max(m, Int(b[1])); end
+        out = [Float64(m)]
+        sevs = [tile_post_send(tr, out, r, tag + 1) for r in 1:np-1]
+        for ev in sevs; wait(ev); end
+        return m
+    else
+        sev = tile_post_send(tr, buf, 0, tag)
+        res = zeros(1)
+        rev = tile_post_recv(tr, res, 0, tag + 1)
+        wait(sev); wait(rev)
+        return Int(res[1])
+    end
 end
 
 "The local array of a tile (only valid on a rank that holds the current version, after `tile_sync!`)."
