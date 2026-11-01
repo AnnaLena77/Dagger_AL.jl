@@ -51,3 +51,20 @@ TileFlow (`tf!(sp, f, TIn(id), TRW(id))`) implements the design for whole tiles:
 | 4 x 16 | 1.20 / 1.61 / 2.03 s | 1.67 / 1.80 / 1.99 s |
 
 Equal at 1 x 64, 29 % faster at 2 x 32, 11 % at 4 x 16 (medians). Whole tiles only; the first repetition of each process includes the cold buffer pool. Across nodes (round 1 of job 9790, 8192/256): 2 x 1 x 64 TileFlow 0.89-1.18 s vs Dagger 1.28-1.36 s; 4 x 1 x 64 1.00-1.55 s vs 1.72-1.85 s; Dagger's own path gets slower with more nodes. At 16384/512 the Dagger path fails (`BUGS.md` B26).
+
+### Where the Dagger MPI path spends its time (job 9800, Fulda, Cholesky 8192/256, `JULIA_DAGGER_HIER_TIMING=1`, warm regions of 5984 tasks, 2026-11-01)
+
+| 1 x 64 | ms | share |
+|---|---|---|
+| phase 4 schedule | 710-1220 | 85-90 % |
+| phase 1 prescan | 82 | 7 % |
+| phase 1 aliasing | 13 | 1 % |
+| dag + partition + epilogue | ~28 | 2 % |
+| planning total | 833-1345 | |
+| measured run | 1186-1549 | |
+
+Planning is almost the whole run; per task 120-200 us in phase 4. Aliasing is not the problem. At 2 x 32: phase 4 830-910 ms, epilogue 155-210 ms, 497 data moves (87-110 ms). Next: split phase 4 (`distribute_task!`) into task build / processor choice / data moves / launch / cross-rank agreement before choosing between a tile path and cheaper launching.
+
+### Current standing (same node type, same code, Cholesky 8192/256, 1 x 64, memory interleaved where stated)
+
+Distributed (1 process x 64 threads) 0.90 s; Dagger MPI 1.48 s; TileFlow prototype 0.59 s. Dagger MPI is still slower than Distributed; the prototype is not in `src/`.
