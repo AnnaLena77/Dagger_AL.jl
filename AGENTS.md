@@ -1622,3 +1622,28 @@ lesson.
    for EVERY region, the strictest case. A test of ours that appended from
    several threads to a plain `Vector` lost an entry once in a full run: tasks that
    run on several threads need a lock around shared test state.
+
+136. **A lock-free protocol is not done until a stress test has failed on the
+   buggy version.** The micro-task prototype (`LLM_info/bench/micro/`) set a
+   task's dependency count *after* registering it with its predecessors, so a
+   predecessor that finished in between launched it early (`+(::Int64,
+   ::Nothing)` in 3 of 3 runs of the stress test; the 5-test functional suite
+   was green). Order: set the counter to `1 + k` (k dependencies plus a guard)
+   *before* registering anywhere, subtract one for every refused registration
+   (predecessor already done), drop the guard last. Stress it with random DAGs
+   built concurrently from all threads, several waiters, nested spawns and
+   error propagation, against a sequential evaluation, at 2-64 threads (61091
+   assertions per run, all pass on Fulda at 8/32/64). Costs on Fulda (DAG with 3
+   dependencies, us/task, 8/32/64 threads): micro 11 / 16 / 20, Dagger 188 / 227 /
+   247; plain `Threads.@spawn` already costs 3 / 8 / 12 us there, so 10 us per task
+   is reachable only up to ~8 threads. It is an additive path: it has no scopes,
+   processors, chunks, MemPool or MPI, and must not replace the Dagger path.
+   Integrated as `@light` (`src/microtask.jl`, `test/microtask.jl`). Two more
+   findings: (a) the stress test needs ~300 rounds to catch the early-launch
+   ordering bug (3 of 3 at 8 threads; 40 rounds passed every time), so size a
+   race test by injecting the real bug, not by "it ran"; (b) a DTask that
+   *blocks* on a Julia-scheduled task (`spawn(fetch, light)`) deadlocks on 1-2
+   threads, because it holds the processor while Dagger's occupancy wait
+   (`eager.jl`) spins on `yield()` (lesson 12) and starves the `Threads.@spawn`
+   it waits for. `light_to_dtask` therefore waits in the caller and spawns
+   `identity(value)`. Test thread-count-sensitive designs at `-t 1` and `-t 2`.
