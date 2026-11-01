@@ -1666,3 +1666,19 @@ lesson.
    (0.22 of 0.28 on the next repetition, 0 once the heap had grown). Phase timers
    plus `Base.GC_Diff` around the section found it in one job. A free-list of
    buffers released when the tile is rewritten and its readers are done removes it.
+
+139. **On the Opteron nodes, where the tiles are first touched can matter more than
+   any scheduler change.** A single-process Cholesky on 64 threads (TileFlow
+   prototype, one Fulda node, `LLM_info/bench/tileflow`) took 9.2-12.9 s at
+   16384/512 and 1.16-1.40 s at 8192/256 -- two modes, 6 s and 12 s, in the same
+   job -- and 4.55-4.65 s / 0.58-0.60 s (spread 1.02-1.03) under
+   `numactl --interleave=all`. The driver thread created and filled every tile, so
+   First-Touch put all memory on one of the eight NUMA nodes and 64 threads shared
+   its bandwidth. A cap on concurrent kernels (lesson-sounding suspect: OpenBLAS
+   `trsm` collapse) changed nothing (16: 12.1-12.9 s); pinning threads alone
+   (`JULIA_EXCLUSIVE=1`) gave 5.4-6.9 s; pinning plus interleave 4.4-4.8 s. Any
+   single-node timing taken without controlling memory placement is suspect, and
+   so is any A/B between revisions that differ in who allocates. Before blaming
+   the runtime for a bimodal or noisy result, repeat it under `numactl
+   --interleave=all` (it is in `nix develop`). Whether Dagger's own paths are
+   affected the same way is measured in job `ss-tfnab`.
