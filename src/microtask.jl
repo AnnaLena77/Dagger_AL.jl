@@ -30,10 +30,11 @@ end
 mutable struct LightTask
     f::Any
     args::Any
+    pool::Symbol                                   # thread pool the task is launched on: :default (workers) or :interactive (see `light_spawn_on`)
     @atomic result::Any                            # the value, or a LightFailed
     @atomic left::Int
     @atomic deps::Any                              # nothing | LightNode | LIGHT_DONE
-    LightTask(f, args, left) = new(f, args, nothing, left, nothing)
+    LightTask(f, args, left, pool::Symbol=:default) = new(f, args, pool, nothing, left, nothing)
 end
 
 @inline light_isdone(t::LightTask) = (@atomic :acquire t.deps) === LIGHT_DONE
@@ -51,7 +52,11 @@ end
 light_release!(w::Base.Event) = (notify(w); nothing)
 function light_release!(w::LightTask)
     if (@atomic :acquire_release w.left -= 1) == 0
-        Threads.@spawn _light_run!(w)
+        if w.pool === :interactive && Threads.threadpoolsize(:interactive) > 0
+            Threads.@spawn :interactive _light_run!(w)
+        else
+            Threads.@spawn _light_run!(w)
+        end
     end
     return nothing
 end
@@ -105,12 +110,19 @@ end
 
 Run `f(args...)` as a light task once all `LightTask`/`DTask` arguments are done. See [`@light`](@ref).
 """
-function light_spawn(f, args...)
+light_spawn(f, args...) = light_spawn_on(:default, f, args...)
+"""
+    light_spawn_on(pool::Symbol, f, args...) -> LightTask
+
+Like [`light_spawn`](@ref) but the task runs on thread `pool` (`:default` or `:interactive`; without interactive threads it uses `:default`).
+Kernels never yield, so a short task that must not wait for them (a message send) belongs on the interactive thread.
+"""
+function light_spawn_on(pool::Symbol, f, args...)
     k = 0
     for a in args
         (a isa LightTask || a isa DTask || (a isa LightAfter && a.t isa LightTask)) && (k += 1)
     end
-    t = LightTask(f, args, 1 + k)
+    t = LightTask(f, args, 1 + k, pool)
     for a in args
         if a isa LightTask
             light_add_dependent!(a, t) || (@atomic :acquire_release t.left -= 1)   # cannot reach 0: the guard is held

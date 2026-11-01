@@ -196,6 +196,7 @@ function __init__()
     # environment would be baked into the compiled image
     ELIDE_FOREIGN_TASKS[] = get(ENV, "JULIA_DAGGER_ELIDE_FOREIGN_TASKS", "0") in ("1", "true")
     TILEFLOW_LINALG[] = get(ENV, "JULIA_DAGGER_TILEFLOW", "0") in ("1", "true")
+    TILE_COMM_POOL[] = Symbol(get(ENV, "JULIA_DAGGER_TILE_COMM_POOL", "interactive"))
     FREE_MPI_THREADS[] = get(ENV, "JULIA_DAGGER_FREE_MPI_THREADS", "1") in ("1", "true")
     FREE_DATADEPS_THREADS[] = get(ENV, "JULIA_DAGGER_FREE_DATADEPS_THREADS", "0") in ("1", "true")
     DATADEPS_FLAT_ASYNC_MIN[] = parse(Int, get(ENV, "JULIA_DAGGER_FLAT_ASYNC_MIN", "256"))

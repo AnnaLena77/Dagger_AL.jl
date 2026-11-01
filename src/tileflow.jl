@@ -103,6 +103,8 @@ struct _TileRunner; f::Any; arrs::Vector{Any}; end
 _tile_send(tr, arr, dest, tag, ready...) = (wait(tile_post_send(tr, arr, dest, tag)); nothing)
 _tile_wait(ev) = (wait(ev); nothing)
 
+"Thread pool for the communication tasks (sends, waits for receives, the MPI progress task): `:interactive` keeps them off the worker threads, whose kernels never yield. Set from JULIA_DAGGER_TILE_COMM_POOL in `__init__`."
+const TILE_COMM_POOL = Ref(:interactive)
 const TAG_MOD = 4_000_000     # tags stay below Open MPI's tag_ub (8388607); matching is by (pair, tag) order, tags are unique per pair in flight
 
 """
@@ -132,13 +134,13 @@ function tile_spawn!(sp::TileSpace, f, args::Union{TileIn,TileRW}...; at::Union{
             sp.nxfer += 1
             if me == sender
                 t = sp.tiles[id]::LocalTile
-                st = light_spawn(_tile_send, sp.tr, t.arr, r, tag, t.ready === nothing ? nothing : LightAfter(t.ready))
+                st = light_spawn_on(TILE_COMM_POOL[], _tile_send, sp.tr, t.arr, r, tag, t.ready === nothing ? nothing : LightAfter(t.ready))
                 push!(t.readers, st); push!(sp.all_tasks, st); sp.nsent += 1
             elseif me == r
                 m, n = sp.tsize(id)
                 arr = _pool_take(sp, m, n)
                 ev = tile_post_recv(sp.tr, arr, sender, tag)          # posted now, in program order: rendezvous sends find their receive at once
-                rt = light_spawn(_tile_wait, ev)
+                rt = light_spawn_on(TILE_COMM_POOL[], _tile_wait, ev)
                 sp.tiles[id] = LocalTile(arr, true, rt, Any[]); sp.nrecv += 1
             end
             sp.holders[id] = h | rbit

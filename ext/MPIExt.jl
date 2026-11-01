@@ -4038,10 +4038,14 @@ function tile_ensure_progress!()
     lock(TILE_LOCK) do
         t = TILE_PROGRESS[]
         (t === nothing || istaskdone(t)) || return
-        t = Task(tile_progress_loop)
-        Dagger.clear_task_scope!(t)             # lesson 7: no inherited dynamic scope on a long-lived task
-        Dagger.set_task_migratable!(t)          # lesson 98: do not stay on the creator's thread
-        schedule(t)
+        if Dagger.TILE_COMM_POOL[] === :interactive && Threads.threadpoolsize(:interactive) > 0
+            t = Threads.@spawn :interactive tile_progress_loop()      # the otherwise idle first thread: not behind the kernels of the workers
+        else
+            t = Task(tile_progress_loop)
+            Dagger.clear_task_scope!(t)         # lesson 7: no inherited dynamic scope on a long-lived task
+            Dagger.set_task_migratable!(t)      # lesson 98: do not stay on the creator's thread
+            schedule(t)
+        end
         TILE_PROGRESS[] = t
     end
     return
