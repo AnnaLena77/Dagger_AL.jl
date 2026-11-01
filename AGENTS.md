@@ -1682,3 +1682,25 @@ lesson.
    the runtime for a bimodal or noisy result, repeat it under `numactl
    --interleave=all` (it is in `nix develop`). Whether Dagger's own paths are
    affected the same way is measured in job `ss-tfnab`.
+   *Otus check (EPYC 9655, 2 sockets, 2 NUMA nodes, 192 threads; `bench/numa_probe.jl`,
+   bandwidth only):* default policy 347-371 GB/s when one thread first-touches the
+   tiles, 930-1043 GB/s when all threads do (2.6-2.9x); `numactl --interleave=all`
+   gives 440-581 GB/s either way, i.e. it is worse than a parallel first touch,
+   because half of the traffic crosses the socket link. Fulda (8 domains): 10 GB/s
+   serial, 77-103 GB/s parallel, 49 GB/s interleaved. So the portable fix is in the
+   code (initialise tiles from many threads, or let the tasks that own a tile
+   allocate it), not in `numactl`.
+
+140. **JuliaHPC 1.12.6 on Otus ships an OpenBLAS built with `NUM_THREADS=96`; BLAS
+   from more Julia threads than that crashes.** With 192 Julia threads the first
+   `gemm!` calls print `OpenBLAS warning: precompiled NUM_THREADS exceeded` and the
+   process dies with signal 11 (twice at once with the message about too many
+   memory regions); restricting the callers to the first 96 threads and setting
+   `OPENBLAS_NUM_THREADS=1` crashed one of two runs too, so a cap is not a
+   guarantee. A tile Cholesky/LU/GEMM at 192 threads on Otus needs a BLAS built for
+   it (or at most ~96 concurrent BLAS callers) -- not yet confirmed with Dagger.
+   Do not filter a probe's output through `head`: it closes the pipe and kills
+   the process with SIGPIPE, which looks like a crash (it cost two Otus jobs).
+   Access: `ssh -o RemoteCommand=none -o RequestTTY=no otus 'ssh otus bash -l -s'`
+   (the config's `RemoteCommand` is overridden on the command line only), module
+   `lang JuliaHPC/1.12.6-foss-2025a`, account `hpc-prf-aamthpc`, partition `normal`.
