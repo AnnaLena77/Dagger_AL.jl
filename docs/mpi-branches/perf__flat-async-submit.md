@@ -22,4 +22,4 @@ With the option forced on for every region (`JULIA_DAGGER_FLAT_ASYNC_MIN=1`, lap
 
 ## Limits and notes
 
-Not used under uniform execution (an MPI rank's submission runs collectives: see `AsyncEnqueueQueue`). A submission failure surfaces on the planning task at the next hand-off or at the end of the region. The default minimum is 0 (off); 1024 tasks is the suggested default once the Distributed suite is green.
+Not used under uniform execution (an MPI rank's submission runs collectives: see `AsyncEnqueueQueue`). A submission failure surfaces on the planning task at the next hand-off or at the end of the region. **Default (since `5e266b5`): 256 tasks** (`JULIA_DAGGER_FLAT_ASYNC_MIN`, 0 = off). Fulda, gemm 4096/128 (32768 tasks), interleaved: 32 threads 102.5 -> 65.5 us/task (-36 %), 64 threads 122.0 -> 96.4 us (-21 %); 256-tile algorithms 0-16 % faster, none slower; against stock Dagger 0.22.7 with 128-tiles 3.7-6.2x at 64 threads. The first region of a process no longer compiles the submitter (the precompile workload runs one async region). Full numbers: `LLM_info/OPTIMIZATIONS.md` section 47.

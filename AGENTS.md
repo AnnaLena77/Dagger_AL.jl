@@ -1605,3 +1605,20 @@ lesson.
    traffic, an interleaved ABBA on the target node can (`bench/ss/ss_tcab.sbatch`).
    A profile on a Fulda node needs `lowercase(path)` when matching Dagger frames
    (the export lives in `/data/dagger-<name>/`).
+
+135. **A knob left off "because it was noisy" has to be re-measured in the regime where it
+   matters.** The async flat submitter existed and was off since the first A/B
+   found no resolvable difference at 8192/256 tiles. The task-cost work of
+   lesson 134 then showed that the Datadeps planner is the bottleneck exactly when
+   there are many small tasks (89-95 % of the thread time waiting for work at
+   128-tiles), and there the same switch removed 26-37 us per task on Fulda
+   (-36 % at 32 threads, -21 % at 64), against a few percent for each of the
+   micro-optimisations. Test a setting where the profile says its stage is the
+   limit, not at the size that was convenient. Two things made it safe to switch on:
+   the first async region compiled the submitter (+0.45 s laptop, seconds on a slow
+   node), so the precompile workload now runs one async region
+   (`DATADEPS_FLAT_ASYNC_FORCE`, set only there: precompilation is single-threaded
+   and skips the path); and the broad test run was repeated with the path forced on
+   for EVERY region, the strictest case. A test of ours that appended from
+   several threads to a plain `Vector` lost an entry once in a full run: tasks that
+   run on several threads need a lock around shared test state.
