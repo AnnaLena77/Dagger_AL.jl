@@ -18,6 +18,7 @@ function potrf_checked!(uplo, A, info_arr)
 end
 function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{UpperTriangular}) where T
     LinearAlgebra.checksquare(A)
+    (r = tileflow_chol!(A, 'U')) === nothing || return r      # opt-in TileFlow layer; `nothing` = unsupported, use Datadeps below
 
     zone = one(T)
     mzone = -one(T)
@@ -63,6 +64,7 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{UpperTriangular}) where T
 end
 function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{LowerTriangular}) where T
     LinearAlgebra.checksquare(A)
+    (r = tileflow_chol!(A, 'L')) === nothing || return r      # opt-in TileFlow layer; `nothing` = unsupported, use Datadeps below
 
     zone = one(T)
     mzone = -one(T)

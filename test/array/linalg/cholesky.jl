@@ -47,3 +47,33 @@
     @test_broken cholesky(DA).U == 42 # This should throw PosDefException
     #@test_throws_unwrap PosDefException cholesky(DA).U
 end
+
+@testset "Cholesky on the TileFlow layer (opt-in) matches Datadeps" begin
+    old = Dagger.TILEFLOW_LINALG[]
+    try
+        for T in (Float64, Float32, ComplexF64), (uplo, W) in (('L', LowerTriangular), ('U', UpperTriangular))
+            n, nb = 96, 16
+            X = rand(T, n, n); A = X * X' + n * I; A = (A + A') / 2
+            DA = distribute(copy(A), Blocks(nb, nb))
+            Dagger.tileflow_linalg!(false)
+            ref, info0 = LinearAlgebra._chol!(copy(DA), W)
+            Dagger.tileflow_linalg!(true)
+            res, info1 = LinearAlgebra._chol!(copy(DA), W)
+            Dagger.tileflow_linalg!(false)
+            F = uplo == 'L' ? tril : triu
+            @test info0 == 0 && info1 == 0
+            @test norm(F(collect(res.data)) - F(collect(ref.data))) / norm(A) < (T <: Union{Float32,ComplexF32} ? 1e-4 : 1e-10)
+        end
+        # not positive definite: nonzero info, no exception, no hang
+        A = rand(64, 64); A = A + A'; DA = distribute(A, Blocks(16, 16))
+        Dagger.tileflow_linalg!(true)
+        _, info = LinearAlgebra._chol!(copy(DA), LowerTriangular)
+        @test info > 0
+        # unsupported tile shape: falls back to Datadeps
+        DA2 = distribute(let X = rand(48, 48); X * X' + 48I end, Blocks(16, 12))
+        _, i2 = LinearAlgebra._chol!(copy(DA2), LowerTriangular)
+        @test i2 == 0
+    finally
+        Dagger.tileflow_linalg!(old)
+    end
+end

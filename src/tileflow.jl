@@ -237,3 +237,12 @@ end
 "The local array of a tile (only valid on a rank that holds the current version, after `tile_sync!`)."
 tile_data(sp::TileSpace, id::Int) = (t = sp.tiles[id]; t === nothing ? nothing : t.arr)
 tile_stats(sp::TileSpace) = (tasks=sp.ntasks, own=sp.nown, transfers=sp.nxfer, sent=sp.nsent, received=sp.nrecv)
+
+
+# --- Chunks as tiles: which rank holds a `Chunk`, and its array on that rank ---------------------------------------------------------------
+"`tile_chunk_owner(chunk) -> Int`: the rank of the transport that holds the chunk's array, or -1 when this layer cannot use it (MPIExt adds MPI chunks)."
+tile_chunk_owner(c::Chunk) = c.handle isa MemPool.DRef && c.handle.owner == myid() && myid() == 1 ? 0 : -1
+"`tile_chunk_array(chunk)`: the array itself (no copy) on the holding rank, `nothing` elsewhere."
+tile_chunk_array(c::Chunk) = c.handle isa MemPool.DRef ? MemPool.poolget(c.handle) : nothing
+"`tile_chunk_transport_ok(tr, chunk)`: whether the chunk belongs to the communicator of `tr`."
+tile_chunk_transport_ok(tr::TileTransport, c::Chunk) = tr isa LocalTileTransport

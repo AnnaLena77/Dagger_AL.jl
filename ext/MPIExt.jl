@@ -4055,6 +4055,9 @@ function tile_register!(req)
 end
 Dagger.tile_post_send(t::MPITileTransport, arr, dest, tag) = tile_register!(MPI.Isend(arr, t.comm; dest, tag))
 Dagger.tile_post_recv(t::MPITileTransport, arr, source, tag) = tile_register!(MPI.Irecv!(arr, t.comm; source, tag))
+Dagger.tile_chunk_owner(c::Dagger.Chunk{<:Any,<:MPIRef}) = c.handle.rank
+Dagger.tile_chunk_array(c::Dagger.Chunk{<:Any,<:MPIRef}) = c.handle.rank == MPI.Comm_rank(c.handle.comm) ? unwrap(c.handle) : nothing
+Dagger.tile_chunk_transport_ok(t::MPITileTransport, c::Dagger.Chunk{<:Any,<:MPIRef}) = c.handle.comm == t.comm
 function Dagger.tile_barrier(t::MPITileTransport)
     req = MPI.Ibarrier(t.comm)
     while !MPI.Test(req); yield(); end
