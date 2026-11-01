@@ -68,3 +68,7 @@ Planning is almost the whole run; per task 120-200 us in phase 4. Aliasing is no
 ### Current standing (same node type, same code, Cholesky 8192/256, 1 x 64, memory interleaved where stated)
 
 Distributed (1 process x 64 threads) 0.90 s; Dagger MPI 1.48 s; TileFlow prototype 0.59 s. Dagger MPI is still slower than Distributed; the prototype is not in `src/`.
+
+### Phase 4 is bound by task *launch*, not by planning (job 9804, Fulda, Cholesky 8192/256, 5984-task regions, `HIER_TIMING`)
+
+1 x 64: `distribute_task!` on the planning task 430-477 ms (about 80 us/task: populate 22, syncdeps 20, spec+enqueue 10, track 9, copy-to 9, scope 5, schedule 3, history 2), then the final `maybe_flush_batch!` takes 251-437 ms and `close_submitter!` 3-8 ms; phase 4 in total 850-1045 ms. The planner produces tasks at ~80 us each, the single submitter launches them at ~140 us each, and the backlog is drained in the last flush. 2 x 32: flush 1-4 ms (the submitter keeps up), but copy-to costs 27 us/task (497 data moves). Next: break `eager_launch!` down under MPI (the local fast path of lesson 103 requires `DistributedAcceleration`, so MPI tasks take the general placement path), then consider several submitters, then the tile path.
