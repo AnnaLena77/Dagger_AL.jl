@@ -64,8 +64,11 @@ Cholesky factorization of `A` in place on the TileFlow layer; `nothing` when `A`
 Returns `(factor wrapper, info)` like `LinearAlgebra._chol!`.
 """
 function tileflow_chol!(A::DArray{T,2}, uplo::Char) where T
+    timing = HIER_TIMING[]
+    t0 = timing ? time_ns() : UInt64(0)
     plan = tileflow_plan(A)
     plan === nothing && return nothing
+    t1 = timing ? time_ns() : UInt64(0)
     sp = plan.space; nt = plan.nt
     id(i, j) = tile_id(nt, i, j)
     zone = one(T); mzone = -one(T); rzone = one(real(T)); rmzone = -one(real(T))
@@ -110,7 +113,12 @@ function tileflow_chol!(A::DArray{T,2}, uplo::Char) where T
             end
         end
     end
+    t2 = timing ? time_ns() : UInt64(0)
     tile_sync!(sp)
     inf = tile_allreduce_max(plan.tr, info[])
+    if timing
+        t3 = time_ns()
+        @info "tileflow_chol!: plan $(round((t1 - t0) / 1e6; digits=1)) ms, walk $(round((t2 - t1) / 1e6; digits=1)) ms, sync (run) $(round((t3 - t2) / 1e6; digits=1)) ms, total $(round((t3 - t0) / 1e6; digits=1)) ms; $(tile_stats(sp))"
+    end
     return (uplo == 'L' ? LowerTriangular(A) : UpperTriangular(A)), inf
 end
