@@ -11,7 +11,9 @@
             DA = zeros(Blocks(nb, nb), T, n, n)
             copyto!(DA, A)
             Dagger.tileflow_linalg!(true)
+            runs0 = Dagger.TILEFLOW_RUNS[]
             res, info = LinearAlgebra._chol!(DA, W)
+            @test Dagger.TILEFLOW_RUNS[] == runs0 + 1          # the layer really ran on every rank
             Dagger.tileflow_linalg!(false)
             R = collect(res.data)
             ref = cholesky(Hermitian(A, uplo == 'L' ? :L : :U))
@@ -34,7 +36,9 @@
         X = rand(48, 48); A = X * X' + 48I; A = (A + A') / 2
         DA = zeros(Blocks(16, 12), Float64, 48, 48); copyto!(DA, A)
         Dagger.tileflow_linalg!(true)
+        runs1 = Dagger.TILEFLOW_RUNS[]
         _, i2 = LinearAlgebra._chol!(DA, LowerTriangular)
+        @test Dagger.TILEFLOW_RUNS[] == runs1                   # unsupported shape: no TileFlow
         Dagger.tileflow_linalg!(false)
         @test i2 == 0
     finally

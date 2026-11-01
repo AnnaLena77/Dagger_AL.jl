@@ -3,7 +3,9 @@
 # MPI communicator). Anything else returns `nothing` and the caller takes the ordinary Datadeps path, so no functionality is lost.
 # The tiles ARE the DArray's chunk arrays (no copy): the algorithm writes the result into the array in place, on the rank that owns the chunk.
 
-const TILEFLOW_LINALG = Ref(get(ENV, "JULIA_DAGGER_TILEFLOW", "0") == "1")
+const TILEFLOW_LINALG = Ref(false)         # set from JULIA_DAGGER_TILEFLOW in __init__ (not here: a precompiled const would bake in the build-time value)
+"How many factorizations ran on the TileFlow layer in this process (tests assert on it: the fallback gives the same numbers)."
+const TILEFLOW_RUNS = Threads.Atomic{Int}(0)
 "`tileflow_linalg!(on::Bool)`: let supported `DArray` factorizations run on the TileFlow layer."
 tileflow_linalg!(on::Bool) = (TILEFLOW_LINALG[] = on)
 
@@ -69,6 +71,7 @@ function tileflow_chol!(A::DArray{T,2}, uplo::Char) where T
     plan = tileflow_plan(A)
     plan === nothing && return nothing
     t1 = timing ? time_ns() : UInt64(0)
+    Threads.atomic_add!(TILEFLOW_RUNS, 1)
     sp = plan.space; nt = plan.nt
     id(i, j) = tile_id(nt, i, j)
     zone = one(T); mzone = -one(T); rzone = one(real(T)); rmzone = -one(real(T))

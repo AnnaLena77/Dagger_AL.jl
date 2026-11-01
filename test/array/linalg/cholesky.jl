@@ -58,7 +58,9 @@ end
             Dagger.tileflow_linalg!(false)
             ref, info0 = LinearAlgebra._chol!(copy(DA), W)
             Dagger.tileflow_linalg!(true)
+            runs0 = Dagger.TILEFLOW_RUNS[]
             res, info1 = LinearAlgebra._chol!(copy(DA), W)
+            @test Dagger.TILEFLOW_RUNS[] == runs0 + 1          # the layer really ran (the Datadeps fallback gives the same numbers)
             Dagger.tileflow_linalg!(false)
             F = uplo == 'L' ? tril : triu
             @test info0 == 0 && info1 == 0
@@ -71,8 +73,10 @@ end
         @test info > 0
         # unsupported tile shape: falls back to Datadeps
         DA2 = distribute(let X = rand(48, 48); X * X' + 48I end, Blocks(16, 12))
+        runs1 = Dagger.TILEFLOW_RUNS[]
         _, i2 = LinearAlgebra._chol!(copy(DA2), LowerTriangular)
         @test i2 == 0
+        @test Dagger.TILEFLOW_RUNS[] == runs1                   # ... and the unsupported shape did NOT use it
     finally
         Dagger.tileflow_linalg!(old)
     end
