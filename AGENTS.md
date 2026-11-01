@@ -1704,3 +1704,14 @@ lesson.
    Access: `ssh -o RemoteCommand=none -o RequestTTY=no otus 'ssh otus bash -l -s'`
    (the config's `RemoteCommand` is overridden on the command line only), module
    `lang JuliaHPC/1.12.6-foss-2025a`, account `hpc-prf-aamthpc`, partition `normal`.
+
+141. **A fallback that gives the same answer hides a switch that does nothing.** The
+   TileFlow routing of `LinearAlgebra._chol!` was controlled by a `const Ref`
+   initialised from `JULIA_DAGGER_TILEFLOW` -- evaluated at precompile time, so the
+   run-time variable was ignored (read it in `__init__`, see `ELIDE_FOREIGN_TASKS`).
+   The tests turned the layer on with a function call and compared numbers with the
+   Datadeps result, which the fallback reproduces exactly, so they were green; an
+   A/B on the cluster then showed "no gain" (1.54 vs 1.60 s) for a layer that had
+   measured 0.62 s on its own. Any opt-in path with a fallback needs a counter the
+   tests assert on (`TILEFLOW_RUNS`), for the positive case and for the case that
+   must fall back; and an A/B must print which path ran.
