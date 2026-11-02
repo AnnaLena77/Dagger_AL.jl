@@ -56,6 +56,23 @@ end
         @test runs >= 1
         @test norm(got - A * B) / norm(A * B) < (T === Float32 ? 1e-5 : 1e-12)
     end
+    @testset "the decision does not depend on timing (freshly created arrays, used at once)" begin
+        # A DArray's chunks are created asynchronously; a region must be lowered whether or not they are finished (ranks could otherwise disagree)
+        old = Dagger.TILEFLOW_REGIONS[]
+        try
+            Dagger.tileflow_regions!(true)
+            n0 = Dagger.TILEFLOW_REGION_RUNS[]
+            for _ in 1:10
+                X = rand(64, 64); A = X * X' + 64I
+                D = distribute(copy(A), Blocks(16, 16))
+                _, info = LinearAlgebra._chol!(D, LowerTriangular)
+                @test info == 0
+            end
+            @test Dagger.TILEFLOW_REGION_RUNS[] == n0 + 10
+        finally
+            Dagger.tileflow_regions!(old)
+        end
+    end
     @testset "non-finite input still fails like Datadeps" begin
         A = rand(48, 48) + 48I; A[3, 3] = NaN
         old = Dagger.TILEFLOW_REGIONS[]

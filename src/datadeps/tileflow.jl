@@ -68,7 +68,10 @@ function _region_classify(v, tr, np::Int)
     v0, deps = unwrap_inout(v)
     wrapped = v isa Union{In,Out,InOut,Deps}
     if v0 isa DTask
-        (istaskstarted(v0) && v0.stub === nothing && isready(v0.future)) || return _region_no("an argument is a task that has not finished (a result inside the region)")
+        # N.B. The decision must not depend on timing (whether the task happens to be finished), or ranks could disagree and hang: a task that is
+        # not launched yet was spawned inside this very region (program order, the same on every rank) and rules the region out; a launched one is
+        # waited for (a DArray's chunks are created asynchronously).
+        (istaskstarted(v0) && v0.stub === nothing) || return _region_no("an argument is a task of the region itself (a result used inside the region)")
         r = try fetch(v0; raw=true, move_value=false, unwrap=false) catch; return _region_no("fetching an argument task failed") end
         r isa Chunk || return _region_no("an argument task's result is a $(typeof(r)), not a Chunk")
         v0 = r
