@@ -662,6 +662,7 @@ elide_task!(::Acceleration, spec, task) = false
 # concrete spec type, leaves everything below statically typed.
 eager_launch!(pair::DTaskPair) = _eager_launch!(pair.spec, pair.task)
 function _eager_launch!(spec::DTaskSpec, task::DTask)
+    @nospecialize spec
     # Tasks this process only has to account for (never run or source data for)
     # skip the thunk entirely
     if ELIDE_FOREIGN_TASKS[] && !Dagger.in_task()
