@@ -4091,6 +4091,7 @@ end
 # to an address (`dir_send`).
 const DIR_TAG = 17
 const DIR_BULK_TAG = 18
+const DIR_SERVICE_SPIN = Ref(false)       # JULIA_DAGGER_DIR_SPIN=1: the service never naps (read when the directory starts; for experiments)
 const DIR_BULK_MIN = 512                  # elements: smaller arrays are serialized with the rest of the message
 
 struct MPIDirTransport <: Dagger.DirTransport
@@ -4187,7 +4188,7 @@ function dir_service_loop(s::MPIDirService)
         else
             idle += 1
             # A polling task that only `yield()`s is a wake-up generator (AGENTS.md lessons 12, 126): look a few times in a row, then nap.
-            if idle < 100
+            if idle < 100 || DIR_SERVICE_SPIN[]
                 yield()
             elseif idle < 2000
                 Libc.systemsleep(20e-6); yield()
@@ -4215,6 +4216,7 @@ function Dagger.tile_directory(accel::MPIAcceleration)
     lock(MPI_DIRS_LOCK) do
         s = get(MPI_DIRS, accel.comm, nothing)
         s !== nothing && return s.d
+        DIR_SERVICE_SPIN[] = get(ENV, "JULIA_DAGGER_DIR_SPIN", "0") in ("1", "true")
         dcomm = MPI.Comm_dup(accel.comm)                         # collective
         tr = MPIDirTransport(dcomm, ReentrantLock(), Tuple{MPI.Request,Any}[])
         d = Dagger.TileDirectory(MPI.Comm_rank(dcomm), 0:MPI.Comm_size(dcomm)-1, tr)
