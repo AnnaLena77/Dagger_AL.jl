@@ -1,0 +1,100 @@
+# spawn_datadeps regions executed on the TileFlow layer (JULIA_DAGGER_TILEFLOW_REGIONS=1): the library code is unchanged, results must equal the
+# Datadeps path, and the counter proves the layer really ran (the fallback gives the same numbers).
+using Dagger, LinearAlgebra, Random, Test
+
+function tf_region_compare(f)
+    old = Dagger.TILEFLOW_REGIONS[]
+    try
+        Dagger.tileflow_regions!(false)
+        ref = f()
+        Dagger.tileflow_regions!(true)
+        n0 = Dagger.TILEFLOW_REGION_RUNS[]
+        got = f()
+        return ref, got, Dagger.TILEFLOW_REGION_RUNS[] - n0
+    finally
+        Dagger.tileflow_regions!(old)
+    end
+end
+
+@testset "spawn_datadeps regions on the TileFlow layer" begin
+    n, nb = 96, 16
+    @testset "Cholesky ($T, $W)" for T in (Float64, ComplexF64), W in (LowerTriangular, UpperTriangular)
+        X = rand(T, n, n); A = X * X' + n * I; A = (A + A') / 2
+        chol = () -> begin
+            D = distribute(copy(A), Blocks(nb, nb))
+            r, info = LinearAlgebra._chol!(D, W)
+            (collect(r.data), info)
+        end
+        ref, got, runs = tf_region_compare(chol)
+        F = W === LowerTriangular ? tril : triu
+        @test runs >= 1
+        @test got[2] == 0 && ref[2] == 0
+        @test norm(F(got[1]) - F(ref[1])) / norm(A) < 1e-10
+    end
+    @testset "Cholesky of a matrix that is not positive definite reports the same info" begin
+        A = rand(64, 64); A = A + A'
+        nonpd = () -> (D = distribute(copy(A), Blocks(16, 16)); LinearAlgebra._chol!(D, LowerTriangular)[2])
+        ref, got, runs = tf_region_compare(nonpd)
+        @test runs >= 1
+        @test ref > 0 && got > 0
+    end
+    @testset "LU without pivoting ($T)" for T in (Float64, ComplexF64)
+        A = rand(T, n, n) + n * I
+        lunp = () -> begin
+            D = distribute(copy(A), Blocks(nb, nb))
+            F = lu(D, NoPivot())
+            (collect(F.L), collect(F.U))
+        end
+        ref, got, runs = tf_region_compare(lunp)
+        @test runs >= 1
+        @test norm(got[1] * got[2] - A) / norm(A) < 1e-9
+        @test norm(got[1] - ref[1]) / norm(A) < 1e-9
+    end
+    @testset "matrix product ($T)" for T in (Float64, Float32)
+        A = rand(T, 64, 48); B = rand(T, 48, 80)
+        ref, got, runs = tf_region_compare(() -> collect(distribute(A, Blocks(16, 16)) * distribute(B, Blocks(16, 16))))
+        @test runs >= 1
+        @test norm(got - A * B) / norm(A * B) < (T === Float32 ? 1e-5 : 1e-12)
+    end
+    @testset "non-finite input still fails like Datadeps" begin
+        A = rand(48, 48) + 48I; A[3, 3] = NaN
+        old = Dagger.TILEFLOW_REGIONS[]
+        try
+            for on in (false, true)
+                Dagger.tileflow_regions!(on)
+                @test_throws Dagger.DTaskFailedException lu(distribute(copy(A), Blocks(16, 16)), NoPivot())
+            end
+        finally
+            Dagger.tileflow_regions!(old)
+        end
+    end
+    @testset "task values, failures and the contract" begin
+        old = Dagger.TILEFLOW_REGIONS[]
+        try
+            Dagger.tileflow_regions!(true)
+            D = distribute(fill(2.0, 32, 32), Blocks(16, 16)); Ac = D.chunks
+            n0 = Dagger.TILEFLOW_REGION_RUNS[]
+            t = nothing
+            Dagger.spawn_datadeps() do
+                t = Dagger.@spawn sum(Dagger.In(Ac[1, 1]))
+            end
+            @test Dagger.TILEFLOW_REGION_RUNS[] == n0 + 1
+            @test fetch(t) == 2.0 * 16 * 16                                     # the value of a task is there (on its rank)
+            # a task of a lowered region cannot be an argument of another task
+            @test_throws ArgumentError Dagger.@spawn identity(t)
+            # a failing task raises DTaskFailedException from the region
+            @test_throws Dagger.DTaskFailedException Dagger.spawn_datadeps() do
+                Dagger.@spawn error("boom", Dagger.InOut(Ac[1, 1]))
+            end
+            # an unsupported argument (a Ref) sends the whole region to the ordinary planner
+            n1 = Dagger.TILEFLOW_REGION_RUNS[]
+            r = Ref(0)
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn ((x, y) -> nothing)(Dagger.In(Ac[1, 1]), r)
+            end
+            @test Dagger.TILEFLOW_REGION_RUNS[] == n1
+        finally
+            Dagger.tileflow_regions!(old)
+        end
+    end
+end

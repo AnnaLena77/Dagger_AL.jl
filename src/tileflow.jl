@@ -203,6 +203,20 @@ Wait for everything this rank started, then agree with the other ranks on whethe
 even when a kernel failed here, the first local error is rethrown, and a rank that saw no error of its own still throws when another rank did.
 """
 function tile_sync!(sp::TileSpace)
+    err, anyfail = tile_wait_all!(sp)
+    err === nothing || throw(err)
+    anyfail == 0 || error("TileFlow: a task failed on another rank")
+    return nothing
+end
+
+"""
+    tile_wait_all!(space) -> (err, anyfail)
+
+Like [`tile_sync!`](@ref) but returns instead of throwing: the first error of a task of this rank (or `nothing`) and the maximum failure flag over all
+ranks (0: nobody failed). Every rank passes the barrier and the agreement either way. Used where something (the restore of the results) must still
+happen after a failure.
+"""
+function tile_wait_all!(sp::TileSpace)
     err = nothing
     for t in sp.all_tasks
         try
@@ -214,9 +228,27 @@ function tile_sync!(sp::TileSpace)
     empty!(sp.all_tasks)
     tile_barrier(sp.tr)
     anyfail = tile_allreduce_max(sp.tr, err === nothing ? 0 : 1)
-    err === nothing || throw(err)
-    anyfail == 0 || error("TileFlow: a task failed on another rank")
-    return nothing
+    return err, anyfail
+end
+
+"`tile_scope_rank(scope) -> Union{Int,Nothing}`: the rank a scope pins a task to, or `nothing` when it is something the tile layer does not understand (MPIExt adds MPI scopes)."
+tile_scope_rank(scope) = nothing
+
+"""
+    tile_allgather_ints(tr, v::Vector{Int}) -> Vector{Vector{Int}}
+
+Every rank contributes `v` (same length everywhere) and gets all contributions, indexed by rank + 1. Built on the send/receive primitives, cooperative.
+"""
+function tile_allgather_ints(tr::TileTransport, v::Vector{Int})
+    np = tile_nranks(tr); me = tile_rank(tr)
+    np == 1 && return [v]
+    tag = TAG_MOD + 2000
+    out = [i == me ? v : zeros(Int, length(v)) for i in 0:np-1]
+    evs = Base.Event[]
+    for r in 0:np-1; r == me || push!(evs, tile_post_recv(tr, out[r+1], r, tag)); end
+    for r in 0:np-1; r == me || push!(evs, tile_post_send(tr, v, r, tag)); end
+    for ev in evs; wait(ev); end
+    return out
 end
 
 "`tile_allreduce_max(tr, x::Int)`: the maximum of `x` over all ranks (cooperative; every rank must call it)."
@@ -263,14 +295,15 @@ tile_chunk_array(c::Chunk) = c.handle isa MemPool.DRef ? MemPool.poolget(c.handl
 tile_chunk_transport_ok(tr::TileTransport, c::Chunk) = tr isa LocalTileTransport
 
 """
-    tile_restore!(space)
+    tile_restore!(space; throw_errors=true) -> (err, anyfail)
 
 Finish a computation: wait for everything, then make every tile's final version end up in the array each rank started with (`homes`): a tile that was
 last written on another rank is sent back, a tile that lives in a received buffer is copied into the original array. A tile nobody wrote is untouched.
-This is what makes the result visible through the `DArray` (or the small array) the tiles came from. Call it on every rank.
+This is what makes the result visible through the `DArray` (or the small array) the tiles came from. Call it on every rank. The restore also runs when
+a task failed (the transfers it waits for still happen), and then the agreed failure is thrown, or returned with `throw_errors=false`.
 """
-function tile_restore!(sp::TileSpace)
-    tile_sync!(sp)                                    # nothing may still read or write an original array
+function tile_restore!(sp::TileSpace; throw_errors::Bool=true)
+    err, anyfail = tile_wait_all!(sp)                  # nothing may still read or write an original array
     n = length(sp.holders)
     for id in 1:n
         hm = sp.homes[id]
@@ -279,12 +312,18 @@ function tile_restore!(sp::TileSpace)
             (hm >> r) & 1 == 1 && _tile_ensure!(sp, id, r)
         end
     end
-    tile_sync!(sp)                                    # the transfers are done
+    err2, anyfail2 = tile_wait_all!(sp)                # the transfers are done
+    err === nothing && (err = err2)
+    anyfail = max(anyfail, anyfail2)
     ids = [id for id in 1:n if (sp.homes[id] >> sp.me) & 1 == 1 && sp.origs[id] !== nothing && sp.tiles[id] !== nothing &&
                                (sp.tiles[id]::LocalTile).arr !== sp.origs[id]]
     Threads.@threads :static for i in eachindex(ids)
         id = ids[i]
         copyto!(sp.origs[id], (sp.tiles[id]::LocalTile).arr)
     end
-    return nothing
+    if throw_errors
+        err === nothing || throw(err)
+        anyfail == 0 || error("TileFlow: a task failed on another rank")
+    end
+    return err, anyfail
 end

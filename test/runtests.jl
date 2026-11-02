@@ -26,6 +26,7 @@ tests = [
     ("Local Fast Path", "local-fastpath.jl"),
     ("Light Tasks", "microtask.jl"),
     ("TileFlow", "tileflow.jl"),
+    ("TileFlow Regions", "datadeps_tileflow.jl"),
     ("Dynamic Loop", "bulk.jl"),
     ("NUMA Map", "numa.jl"),
     ("Processor Grids", "procgrid.jl"),

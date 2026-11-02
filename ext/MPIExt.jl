@@ -4062,6 +4062,22 @@ Dagger.tile_post_recv(t::MPITileTransport, arr, source, tag) = tile_register!(MP
 Dagger.tile_chunk_owner(c::Dagger.Chunk{<:Any,<:MPIRef}) = c.handle.rank
 Dagger.tile_chunk_array(c::Dagger.Chunk{<:Any,<:MPIRef}) = c.handle.rank == MPI.Comm_rank(c.handle.comm) ? unwrap(c.handle) : nothing
 Dagger.tile_chunk_transport_ok(t::MPITileTransport, c::Dagger.Chunk{<:Any,<:MPIRef}) = c.handle.comm == t.comm
+# a scope that pins a task to one rank: an ExactScope of an MPIProcessor, or a union of such with one rank
+function Dagger.tile_scope_rank(s::Dagger.ExactScope)
+    p = s.processor
+    return p isa MPIProcessor ? p.rank : nothing
+end
+function Dagger.tile_scope_rank(s::Dagger.UnionScope)
+    r = nothing
+    for m in s.scopes
+        m isa Dagger.ExactScope || return nothing
+        q = Dagger.tile_scope_rank(m)
+        q === nothing && return nothing
+        (r === nothing || r == q) || return nothing
+        r = q
+    end
+    return r
+end
 function Dagger.tile_barrier(t::MPITileTransport)
     req = MPI.Ibarrier(t.comm)
     while !MPI.Test(req); yield(); end

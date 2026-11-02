@@ -406,6 +406,7 @@ function eager_process_elem_submission_to_local!(arg::Argument)
     @assert !(v isa Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
     if v isa DTask
         task = v
+        task.stub isa TileStub && throw(ArgumentError("the result of a task of a region that ran on the TileFlow layer cannot be an argument of another task"))
         if task.stub !== nothing
             # No thunk exists here: the placeholder result is the argument
             arg.value = task.stub
@@ -419,6 +420,7 @@ function eager_process_elem_submission_to_local(arg::TypedArgument{T}) where T
     @assert !(T <: Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
     if T <: DTask
         task = value(arg)::DTask
+        task.stub isa TileStub && throw(ArgumentError("the result of a task of a region that ran on the TileFlow layer cannot be an argument of another task"))
         if task.stub !== nothing
             return TypedArgument(arg.pos, task.stub)
         elseif istaskstarted(task)
