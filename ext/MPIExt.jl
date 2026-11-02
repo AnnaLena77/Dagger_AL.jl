@@ -4090,14 +4090,36 @@ end
 # The identifier of a rank in the directory is its rank in the communicator; with a changing set of processes this is the one place that maps an identifier
 # to an address (`dir_send`).
 const DIR_TAG = 17
+const DIR_BULK_TAG = 18
+const DIR_BULK_MIN = 512                  # elements: smaller arrays are serialized with the rest of the message
 
 struct MPIDirTransport <: Dagger.DirTransport
     comm::MPI.Comm
     lock::ReentrantLock
-    sends::Vector{Tuple{MPI.Request,Vector{UInt8}}}      # started sends and the buffers they read from, until they complete
+    sends::Vector{Tuple{MPI.Request,Any}}                # started sends and the buffers or arrays they read from, until they complete
 end
 
 function Dagger.dir_send(t::MPIDirTransport, to::Int, msg)
+    io = IOBuffer(); Serialization.serialize(io, msg); buf = take!(io)
+    lock(t.lock) do
+        push!(t.sends, (MPI.Isend(buf, t.comm; dest=to, tag=DIR_TAG), buf))
+    end
+    return nothing
+end
+
+# A big dense isbits array travels as its bytes: a small header on DIR_TAG, then the array itself on DIR_BULK_TAG, both started under the lock so the payloads of one
+# sender are in the order of their headers (messages of one pair and tag do not overtake each other). No serialization and no copy on the sending side; the receiver
+# posts a receive straight into the array it allocates and goes on, the service loop delivers the value when the receive has completed (it never waits for a payload).
+function Dagger.dir_send(t::MPIDirTransport, to::Int, msg::Dagger.DataReply)
+    v = msg.value
+    if v isa Array && isbitstype(eltype(v)) && length(v) >= DIR_BULK_MIN
+        io = IOBuffer(); Serialization.serialize(io, Dagger.DataReplyBulk(msg.reqid, msg.name, msg.version, eltype(v), size(v))); hdr = take!(io)
+        lock(t.lock) do
+            push!(t.sends, (MPI.Isend(hdr, t.comm; dest=to, tag=DIR_TAG), hdr))
+            push!(t.sends, (MPI.Isend(v, t.comm; dest=to, tag=DIR_BULK_TAG), v))     # values are immutable after publication
+        end
+        return nothing
+    end
     io = IOBuffer(); Serialization.serialize(io, msg); buf = take!(io)
     lock(t.lock) do
         push!(t.sends, (MPI.Isend(buf, t.comm; dest=to, tag=DIR_TAG), buf))
@@ -4110,6 +4132,7 @@ mutable struct MPIDirService
     const tr::MPIDirTransport
     const running::Threads.Atomic{Bool}
     task::Union{Nothing,Task}
+    const bulk::Vector{Tuple{MPI.Request,Any}}       # receives of payloads in flight, with the reply to deliver when they are done (the service task only)
 end
 
 function dir_service_loop(s::MPIDirService)
@@ -4123,12 +4146,31 @@ function dir_service_loop(s::MPIDirService)
             req = MPI.Imrecv!(MPI.Buffer(buf), msg)
             while !MPI.Test(req); yield(); end                     # already matched: completes at once
             m = Serialization.deserialize(IOBuffer(buf))
-            try
-                Dagger.dir_handle!(s.d, m)
-            catch e
-                lock(() -> push!(s.d.errors, CapturedException(e, catch_backtrace())), s.d.lock)
+            if m isa Dagger.DataReplyBulk
+                arr = Array{m.T}(undef, m.dims)
+                push!(s.bulk, (MPI.Irecv!(arr, comm; source=MPI.Get_source(stat), tag=DIR_BULK_TAG), Dagger.DataReply(m.reqid, m.name, m.version, arr)))
+            else
+                try
+                    Dagger.dir_handle!(s.d, m)
+                catch e
+                    lock(() -> push!(s.d.errors, CapturedException(e, catch_backtrace())), s.d.lock)
+                end
             end
             progressed = true
+        end
+        i = 1
+        while i <= length(s.bulk)
+            if MPI.Test(s.bulk[i][1])
+                r = s.bulk[i][2]; s.bulk[i] = s.bulk[end]; pop!(s.bulk)
+                try
+                    Dagger.dir_handle!(s.d, r)
+                catch e
+                    lock(() -> push!(s.d.errors, CapturedException(e, catch_backtrace())), s.d.lock)
+                end
+                progressed = true
+            else
+                i += 1
+            end
         end
         lock(s.tr.lock) do
             i = 1
@@ -4174,9 +4216,9 @@ function Dagger.tile_directory(accel::MPIAcceleration)
         s = get(MPI_DIRS, accel.comm, nothing)
         s !== nothing && return s.d
         dcomm = MPI.Comm_dup(accel.comm)                         # collective
-        tr = MPIDirTransport(dcomm, ReentrantLock(), Tuple{MPI.Request,Vector{UInt8}}[])
+        tr = MPIDirTransport(dcomm, ReentrantLock(), Tuple{MPI.Request,Any}[])
         d = Dagger.TileDirectory(MPI.Comm_rank(dcomm), 0:MPI.Comm_size(dcomm)-1, tr)
-        s = MPIDirService(d, tr, Threads.Atomic{Bool}(true), nothing)
+        s = MPIDirService(d, tr, Threads.Atomic{Bool}(true), nothing, Tuple{MPI.Request,Any}[])
         t = Task(() -> dir_service_loop(s))
         Dagger.clear_task_scope!(t)                              # lesson 7: no inherited dynamic scope on a long-lived task
         if Threads.threadpoolsize(:interactive) > 0

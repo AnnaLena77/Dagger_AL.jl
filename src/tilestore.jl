@@ -50,6 +50,15 @@ struct DataMoveAck
     version::Int
 end
 
+"The header of a `DataReply` whose value is a big dense isbits array: a transport may send the bytes of the array itself behind it instead of serializing it."
+struct DataReplyBulk
+    reqid::Int
+    name::TileName
+    version::Int
+    T::DataType
+    dims::Tuple
+end
+
 struct DataMissing
     reqid::Int
     name::TileName
