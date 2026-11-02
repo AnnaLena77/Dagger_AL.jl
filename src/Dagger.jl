@@ -105,6 +105,7 @@ include("rebalance.jl")
 include("microtask.jl")
 include("tileflow.jl")
 include("tilenames.jl")
+include("tiledir.jl")
 include("numa.jl")
 
 # Data dependency task queue
