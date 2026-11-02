@@ -19,6 +19,17 @@ const TILEFLOW_REGION_RUNS = Threads.Atomic{Int}(0)
 tileflow_regions!(on::Bool) = (TILEFLOW_REGIONS[] = on)
 
 const _REGION_OK_OPTIONS = (:name, :acceleration, :return_type)
+# Which option fields must be unset for a task to qualify: all but a few, generated from `Options` itself so a new field is covered automatically.
+let checks = Expr[]
+    for f in fieldnames(Options)
+        (f in _REGION_OK_OPTIONS || f in (:scope, :compute_scope, :exec_scope, :propagates)) && continue
+        push!(checks, :(getfield(opts, $(QuoteNode(f))) === nothing || return $(QuoteNode(f))))
+    end
+    @eval function _region_unset_options(opts::Options)
+        $(checks...)
+        return nothing
+    end
+end
 "Print why a region was not lowered (JULIA_DAGGER_TILEFLOW_WHY=1 or `Dagger.TILEFLOW_WHY[] = true`)."
 const TILEFLOW_WHY = Ref(false)
 _region_no(why) = (TILEFLOW_WHY[] && @info "TileFlow region not lowered: $why"; nothing)
@@ -32,11 +43,11 @@ struct RegionCall
     template::Vector{Any}                   # positional arguments: constants and RegionSlots
     kwargs::Vector{Pair{Symbol,Any}}
     task::DTask
-    fargs::Vector{Argument}                 # for the failure summary
+    spec::Any                               # for the failure summary
     accel::Any                              # the acceleration the region was recorded under
 end
 function region_failure(c::RegionCall, e)
-    s = ThunkSummary(Int(c.task.uid), c.fargs)
+    s = ThunkSummary(Int(c.task.uid), Argument[Argument(ArgPosition(a.pos), a.value) for a in c.spec.fargs])
     return DTaskFailedException{typeof(e)}(s, s, e)
 end
 function (c::RegionCall)(arrs...)
@@ -64,7 +75,7 @@ end
 _region_const(v) = isbitstype(typeof(v)) || v isa Union{Symbol,AbstractString,Type,Function,Nothing}
 
 # Classify one argument: (:const, v) | (:tile, key, RegionTile, write::Bool) | nothing (unsupported)
-function _region_classify(v, tr, np::Int)
+function _region_classify(v, tr, np::Int, memo::IdDict{DTask,Any})
     v0, deps = unwrap_inout(v)
     wrapped = v isa Union{In,Out,InOut,Deps}
     if v0 isa DTask
@@ -72,7 +83,11 @@ function _region_classify(v, tr, np::Int)
         # not launched yet was spawned inside this very region (program order, the same on every rank) and rules the region out; a launched one is
         # waited for (a DArray's chunks are created asynchronously).
         (istaskstarted(v0) && v0.stub === nothing) || return _region_no("an argument is a task of the region itself (a result used inside the region)")
-        r = try fetch(v0; raw=true, move_value=false, unwrap=false) catch; return _region_no("fetching an argument task failed") end
+        r = get(memo, v0, nothing)
+        if r === nothing        # a DArray's chunk task is fetched once per region, not once per use
+            r = try fetch(v0; raw=true, move_value=false, unwrap=false) catch; return _region_no("fetching an argument task failed") end
+            memo[v0] = r
+        end
         r isa Chunk || return _region_no("an argument task's result is a $(typeof(r)), not a Chunk")
         v0 = r
     end
@@ -95,38 +110,58 @@ function _region_classify(v, tr, np::Int)
     return _region_no("unsupported argument of type $(typeof(v0))")
 end
 
-function _region_plan(queue, tr, np::Int)
+# The wrapper of a dependency, cheaply: (value, writes). `Deps` and anything else unusual is left to the full classification (it rejects what it cannot do).
+@inline function _region_split(v)
+    v isa In && return (v.x, false)
+    v isa Out && return (v.x, true)
+    v isa InOut && return (v.x, true)
+    return (v, false)
+end
+
+function _region_plan(queue, tr, np::Int, accel)
     pairs = queue.seen_tasks
+    memo = IdDict{DTask,Any}()
     isempty(pairs) && return nothing
-    tiles = RegionTile[]; index = Dict{Any,Int}()
+    tiles = RegionTile[]; index = Dict{Any,Int}(); seen = IdDict{Any,Int}()
     calls = Any[]
     for pair in pairs
         spec = pair.spec; task = pair.task
         opts = getfield(spec, :options)
+        bad = _region_unset_options(opts)
+        bad === nothing || return _region_no("task option $bad is set")
         scope_rank = nothing                  # the rank a scope pins the task to (adopted as the task's rank)
-        for f in fieldnames(Options)
-            f in _REGION_OK_OPTIONS && continue
+        for f in (:scope, :compute_scope, :exec_scope)
             v = getfield(opts, f)
             v === nothing && continue
-            if f in (:scope, :compute_scope, :exec_scope)
-                r = tile_scope_rank(v)
-                r === nothing && return _region_no("task option $f is set to a scope the tile layer does not understand")
-                (scope_rank === nothing || scope_rank == r) || return _region_no("task scopes name different ranks")
-                scope_rank = r
+            r = tile_scope_rank(v)
+            r === nothing && return _region_no("task option $f is set to a scope the tile layer does not understand")
+            (scope_rank === nothing || scope_rank == r) || return _region_no("task scopes name different ranks")
+            scope_rank = r
+        end
+        # `propagates` lists the names of scoped options in effect when the task was spawned; `task_queue` is the region's own queue
+        pr = getfield(opts, :propagates)
+        (pr === nothing || (pr isa Vector && all(==(:task_queue), pr))) || return _region_no("task option propagates is set ($pr)")
+        fa = spec.fargs
+        isempty(fa) && return _region_no("a task without arguments")
+        a1 = first(fa)
+        (ispositional(a1) && a1.pos.idx == 0) || return _region_no("unexpected function position")
+        fn = value(a1)
+        template = Any[]; kwargs = Pair{Symbol,Any}[]; slots = Tuple{Int,Bool}[]
+        last = 0                              # positions need only ascend (a typed spec starts at 2, an untyped one at 1)
+        for a in fa
+            (ispositional(a) && a.pos.idx != 0) || continue
+            a.pos.idx > last || return _region_no("positional arguments out of order")
+            last = a.pos.idx
+            v = value(a)
+            # Fast path: the same Chunk (or array) object is used by many tasks - look it up instead of classifying it again
+            v0, wr = _region_split(v)
+            c0 = v0 isa DTask ? get(memo, v0, nothing) : v0
+            fid = (c0 isa Chunk || c0 isa Array) ? get(seen, c0, 0) : 0
+            if fid != 0
+                push!(slots, (fid, wr)); push!(template, RegionSlot(length(slots)))
                 continue
             end
-            # `propagates` lists the names of scoped options in effect when the task was spawned; `task_queue` is the region's own queue
-            f === :propagates && v isa Vector && all(==(:task_queue), v) && continue
-            return _region_no("task option $f is set ($v)")
-        end
-        fargs = Argument[Argument(ArgPosition(a.pos), a.value) for a in spec.fargs]
-        isempty(fargs) && return _region_no("a task without arguments")
-        (ispositional(fargs[1]) && fargs[1].pos.idx == 0) || return _region_no("unexpected function position")
-        fn = value(fargs[1])
-        positional = sort!([a for a in fargs[2:end] if ispositional(a)]; by=a -> a.pos.idx)
-        template = Any[]; kwargs = Pair{Symbol,Any}[]; slots = Tuple{Int,Bool}[]
-        for a in positional
-            c = _region_classify(value(a), tr, np)
+            c = _region_classify(v, tr, np, memo)
             c === nothing && return nothing
             if c[1] === :const
                 push!(template, c[2])
@@ -138,12 +173,13 @@ function _region_plan(queue, tr, np::Int)
                 elseif tile.kind === :chunk && (tiles[id].obj::Chunk).handle !== (tile.obj::Chunk).handle
                     return _region_no("two chunk objects for one datum")
                 end
+                seen[tile.obj] = id                    # (an array tile is keyed by its object, a chunk tile by the Chunk object we were handed)
                 push!(slots, (id, write)); push!(template, RegionSlot(length(slots)))
             end
         end
-        for a in fargs[2:end]
+        for a in fa
             ispositional(a) && continue
-            c = _region_classify(value(a), tr, np)
+            c = _region_classify(value(a), tr, np, memo)
             (c === nothing || c[1] !== :const) && return _region_no("a keyword argument is not a constant")
             push!(kwargs, pos_kw(a) => c[2])
         end
@@ -151,7 +187,7 @@ function _region_plan(queue, tr, np::Int)
         w = findfirst(s -> s[2], slots)
         rank = scope_rank !== nothing ? scope_rank : tiles[(w === nothing ? slots[1] : slots[w])[1]].owner
         (0 <= rank < np) || return _region_no("a scope names rank $rank, outside the transport")
-        push!(calls, (; call=RegionCall(fn, template, kwargs, task, fargs, current_acceleration()), slots, rank))
+        push!(calls, (; call=RegionCall(fn, template, kwargs, task, spec, accel), slots, rank))
     end
     return (; tiles, calls)
 end
@@ -190,7 +226,7 @@ function tileflow_region!(queue)::Bool
     tr = tile_transport(accel)
     np = tile_nranks(tr)
     np <= 64 || return false
-    plan = _region_plan(queue, tr, np)
+    plan = _region_plan(queue, tr, np, accel)
     plan === nothing && return false
     t1 = timing ? time_ns() : UInt64(0)
     tiles = plan.tiles; me = tile_rank(tr)
