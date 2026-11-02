@@ -216,3 +216,27 @@ function dir_serve!(d::TileDirectory, net::LocalDirNetwork)
         end
     end
 end
+
+# --- the directory of this process --------------------------------------------------------------------------------------------------------------
+
+const LOCAL_DIRECTORY = Ref{Union{Nothing,TileDirectory}}(nothing)
+const LOCAL_DIRECTORY_LOCK = ReentrantLock()
+
+"""
+    tile_directory(accel=current_acceleration()) -> TileDirectory
+
+The directory of this process for an acceleration. Without MPI it is a directory of one rank (every tile is homed here); `MPIExt` adds the one that talks to the
+other ranks. The first call under MPI duplicates the communicator, which is collective: make it on every rank at the same point of the program.
+"""
+function tile_directory(accel=current_acceleration())
+    lock(LOCAL_DIRECTORY_LOCK) do
+        d = LOCAL_DIRECTORY[]
+        if d === nothing
+            net = LocalDirNetwork([0])
+            d = TileDirectory(0, [0], net)
+            dir_serve!(d, net)
+            LOCAL_DIRECTORY[] = d
+        end
+        return d
+    end
+end

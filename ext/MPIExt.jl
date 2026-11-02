@@ -4084,4 +4084,114 @@ function Dagger.tile_barrier(t::MPITileTransport)
     return
 end
 
+# ------------------------------------------------------------------------------------------------------------------------------------------
+# The tile directory over MPI (src/tiledir.jl): one message per request on a communicator of its own, a service task per rank that hands incoming messages
+# to `dir_handle!` and completes the sends. Same shape as the broadcast relay (Improbe on ANY_SOURCE), but with no tree and no payload bigger than an entry.
+# The identifier of a rank in the directory is its rank in the communicator; with a changing set of processes this is the one place that maps an identifier
+# to an address (`dir_send`).
+const DIR_TAG = 17
+
+struct MPIDirTransport <: Dagger.DirTransport
+    comm::MPI.Comm
+    lock::ReentrantLock
+    sends::Vector{Tuple{MPI.Request,Vector{UInt8}}}      # started sends and the buffers they read from, until they complete
+end
+
+function Dagger.dir_send(t::MPIDirTransport, to::Int, msg)
+    io = IOBuffer(); Serialization.serialize(io, msg); buf = take!(io)
+    lock(t.lock) do
+        push!(t.sends, (MPI.Isend(buf, t.comm; dest=to, tag=DIR_TAG), buf))
+    end
+    return nothing
+end
+
+mutable struct MPIDirService
+    const d::Dagger.TileDirectory
+    const tr::MPIDirTransport
+    const running::Threads.Atomic{Bool}
+    task::Union{Nothing,Task}
+end
+
+function dir_service_loop(s::MPIDirService)
+    comm = s.tr.comm
+    idle = 0
+    while s.running[] && !MPI.Finalized()
+        progressed = false
+        got, msg, stat = MPI.Improbe(MPI.ANY_SOURCE, DIR_TAG, comm, MPI.Status)
+        if got
+            buf = Array{UInt8}(undef, MPI.Get_count(stat, UInt8))
+            req = MPI.Imrecv!(MPI.Buffer(buf), msg)
+            while !MPI.Test(req); yield(); end                     # already matched: completes at once
+            m = Serialization.deserialize(IOBuffer(buf))
+            try
+                Dagger.dir_handle!(s.d, m)
+            catch e
+                lock(() -> push!(s.d.errors, CapturedException(e, catch_backtrace())), s.d.lock)
+            end
+            progressed = true
+        end
+        lock(s.tr.lock) do
+            i = 1
+            while i <= length(s.tr.sends)
+                if MPI.Test(s.tr.sends[i][1])
+                    s.tr.sends[i] = s.tr.sends[end]; pop!(s.tr.sends); progressed = true
+                else
+                    i += 1
+                end
+            end
+        end
+        if progressed
+            idle = 0
+        else
+            idle += 1
+            # A polling task that only `yield()`s is a wake-up generator (AGENTS.md lessons 12, 126): look a few times in a row, then nap.
+            if idle < 100
+                yield()
+            elseif idle < 2000
+                Libc.systemsleep(20e-6); yield()
+            else
+                sleep(0.0005)
+            end
+        end
+    end
+    return
+end
+
+const MPI_DIRS = Dict{MPI.Comm,MPIDirService}()
+const MPI_DIRS_LOCK = ReentrantLock()
+
+function stop_dir_service!(s::MPIDirService)
+    s.running[] = false
+    t = s.task
+    if t !== nothing && t !== current_task()
+        try; wait(t); catch; end
+    end
+    return nothing
+end
+
+function Dagger.tile_directory(accel::MPIAcceleration)
+    lock(MPI_DIRS_LOCK) do
+        s = get(MPI_DIRS, accel.comm, nothing)
+        s !== nothing && return s.d
+        dcomm = MPI.Comm_dup(accel.comm)                         # collective
+        tr = MPIDirTransport(dcomm, ReentrantLock(), Tuple{MPI.Request,Vector{UInt8}}[])
+        d = Dagger.TileDirectory(MPI.Comm_rank(dcomm), 0:MPI.Comm_size(dcomm)-1, tr)
+        s = MPIDirService(d, tr, Threads.Atomic{Bool}(true), nothing)
+        t = Task(() -> dir_service_loop(s))
+        Dagger.clear_task_scope!(t)                              # lesson 7: no inherited dynamic scope on a long-lived task
+        if Threads.threadpoolsize(:interactive) > 0
+            t.sticky = false
+            Base.Threads._spawn_set_thrpool(t, :interactive)     # the otherwise idle first thread
+        else
+            Dagger.set_task_migratable!(t)
+        end
+        schedule(t)
+        Dagger.Sch.errormonitor_tracked("mpi_tile_directory", t)
+        s.task = t
+        MPI_DIRS[accel.comm] = s
+        atexit(() -> stop_dir_service!(s))                       # before MPI.Finalize (atexit is LIFO), as for the broadcast relay
+        return d
+    end
+end
+
 end # module MPIExt
