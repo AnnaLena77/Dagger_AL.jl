@@ -62,10 +62,13 @@ mutable struct TileDirectory
     const errors::Vector{Any}                   # exceptions of the handler (a failing handler must not vanish silently)
     const data::Dict{Tuple{TileName,Int},Any}   # the versions of tiles this rank owns and that readers may still fetch (src/tilestore.jl)
     const datapending::Dict{Int,Any}            # data requests this rank has sent and not had answered
+    const moving::Dict{Tuple{TileName,Int},Tuple{Int,Vector{Any}}}   # versions on their way to another rank: (target, requests that arrived meanwhile)
+    const moved::Dict{Tuple{TileName,Int},Int}  # versions that left this rank: where they went (a stale reader is sent on)
     TileDirectory(me::Integer, ranks, tr::DirTransport) =
         new(Int(me), sort!(collect(Int, ranks)), tr, ReentrantLock(), Dict{TileName,DirEntry}(), Dict{TileName,Vector{DirGet}}(),
             Dict{Int,DirSlot}(), Dict{TileName,DirEntry}(), 0, Threads.Atomic{Int}(0), Any[],
-            Dict{Tuple{TileName,Int},Any}(), Dict{Int,Any}())
+            Dict{Tuple{TileName,Int},Any}(), Dict{Int,Any}(),
+            Dict{Tuple{TileName,Int},Tuple{Int,Vector{Any}}}(), Dict{Tuple{TileName,Int},Int}())
 end
 
 @inline _home(d::TileDirectory, name::TileName) = tile_home(name, d.ranks)

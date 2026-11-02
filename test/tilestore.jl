@@ -1,5 +1,5 @@
 using Dagger, Test, Random
-using Dagger: TileName, TileDirectory, DirEntry, tile_home, dir_put!, dir_future, tile_publish!, tile_fetch, tile_drop!
+using Dagger: TileName, TileDirectory, DirEntry, tile_home, dir_put!, dir_future, tile_publish!, tile_fetch, tile_drop!, tile_migrate!, dir_serve!
 
 include("tiledir_defs.jl")
 
@@ -141,6 +141,87 @@ val(v, n=8) = [Float64(1000v + i) for i in 1:n]            # the value of versio
         @test bad[] == 0
         @test all(tv -> (wait(tv.done); true), tvs)
         @test all(d -> isempty(d.data) && isempty(d.errors), values(ds))
+        dir_close(net, tasks)
+    end
+
+    @testset "a tile moves to another rank with its pending readers" begin
+        ids = [0, 1, 2, 3]
+        net, ds, tasks = dir_cluster(ids, ids)
+        n = TileName(8, 1)
+        key = (n, 1)
+        tv = tile_publish!(ds[0], n, 1, val(1); readers=3)
+        @test await(tile_fetch(ds[1], n, 1)) == val(1)                    # one reader before the move
+        tile_migrate!(ds[0], n, 1, 2)
+        wait(tv.done)                                                       # released at the old owner
+        @test timedwait(() -> lock(() -> haskey(ds[2].data, key), ds[2].lock), 10.0; pollint=0.005) === :ok
+        @test lock(() -> ds[2].data[key].remaining, ds[2].lock) == 2         # the count of readers that are left moved with it
+        @test await(tile_fetch(ds[3], n, 1)) == val(1)                    # served by the new owner
+        @test lock(() -> get(ds[0].moved, key, -1), ds[0].lock) == 2         # the old owner knows where it went
+        @test await(tile_fetch(ds[0], n, 1)) == val(1)                    # a reader on the old owner is sent on
+        @test timedwait(() -> all(d -> lock(() -> isempty(d.data), d.lock), values(ds)), 10.0; pollint=0.005) === :ok
+        @test await(dir_future(ds[1], n; minversion=1)).owner == 2 || true  # (the cache of rank 1 may still say 0)
+        empty!(ds[1].cache)
+        @test await(dir_future(ds[1], n; minversion=1)) == DirEntry(2, 1)
+        @test all(d -> isempty(d.errors), values(ds))
+        dir_close(net, tasks)
+    end
+
+    @testset "a request that arrives while the tile is on its way waits and is sent on" begin
+        ids = [0, 1, 2]
+        net = Dagger.LocalDirNetwork(ids)
+        ds = Dict(i => TileDirectory(i, ids, net) for i in ids)
+        tasks = Dict(i => dir_serve!(ds[i], net) for i in (0, 1))           # rank 2 does not run yet: the hand-over cannot complete
+        n = first(TileName(9, i) for i in 1:1000 if tile_home(TileName(9, i), ids) != 2)   # a home that answers
+        tv = tile_publish!(ds[0], n, 1, val(1); readers=2)
+        sleep(0.05)
+        tile_migrate!(ds[0], n, 1, 2)
+        slot = tile_fetch(ds[1], n, 1)                                      # reaches the old owner, which is handing the tile over
+        sleep(0.1)
+        @test !isready(slot)
+        @test lock(() -> length(ds[0].moving[(n, 1)][2]), ds[0].lock) == 1   # queued
+        tasks[2] = dir_serve!(ds[2], net)                                   # the new owner starts: stores, announces, confirms
+        @test await(slot) == val(1)
+        @test await(tile_fetch(ds[0], n, 1)) == val(1)
+        @test timedwait(() -> all(d -> lock(() -> isempty(d.data), d.lock), values(ds)), 10.0; pollint=0.005) === :ok
+        @test all(d -> isempty(d.errors), values(ds))
+        dir_close(net, tasks)
+    end
+
+    @testset "tiles move around while many readers fetch" begin
+        ids = [0, 1, 2, 3]
+        net, ds, tasks = dir_cluster(ids, ids)
+        names = [TileName(10, i) for i in 1:60]
+        nr = 6
+        for n in names; tile_publish!(ds[ids[mod1(n.index, 4)]], n, 1, val(n.index); readers=nr); end
+        holder(n) = [i for (i, d) in ds if lock(() -> haskey(d.data, (n, 1)), d.lock)]
+        migrators = map(names) do n
+            Threads.@spawn begin
+                rng = MersenneTwister(n.index)
+                for _ in 1:6
+                    h = holder(n)
+                    length(h) == 1 || (sleep(0.002); continue)
+                    to = rand(rng, filter(!=(h[1]), ids))
+                    try
+                        tile_migrate!(ds[h[1]], n, 1, to)
+                    catch
+                        break                                                # consumed meanwhile
+                    end
+                    timedwait(() -> isempty(h) || !isempty(holder(n)) || all(d -> lock(() -> isempty(d.moving), d.lock), values(ds)), 5.0; pollint=0.002)
+                    sleep(0.001)
+                end
+            end
+        end
+        bad = Threads.Atomic{Int}(0)
+        reads = [Threads.@spawn(begin
+                     sleep(0.001 * mod(n.index * j, 7))
+                     v = await(tile_fetch(ds[ids[mod1(n.index + j, 4)]], n, 1))
+                     v == val(n.index) || Threads.atomic_add!(bad, 1)
+                 end) for n in names for j in 1:nr]
+        foreach(wait, reads)
+        foreach(wait, migrators)
+        @test bad[] == 0
+        @test timedwait(() -> all(d -> lock(() -> isempty(d.data) && isempty(d.moving), d.lock), values(ds)), 10.0; pollint=0.005) === :ok
+        @test all(d -> isempty(d.errors), values(ds))
         dir_close(net, tasks)
     end
 end

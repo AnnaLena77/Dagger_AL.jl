@@ -30,6 +30,26 @@ struct DataReply
     version::Int
     value::Any
 end
+"The version left this rank: ask `owner`."
+struct DataMoved
+    reqid::Int
+    name::TileName
+    version::Int
+    owner::Int
+end
+"A version moves to the receiver, with the number of fetches it still has to serve."
+struct DataMove
+    name::TileName
+    version::Int
+    value::Any
+    remaining::Int
+    from::Int
+end
+struct DataMoveAck
+    name::TileName
+    version::Int
+end
+
 struct DataMissing
     reqid::Int
     name::TileName
@@ -107,17 +127,14 @@ end
 function _tile_fetch_continue(d::TileDirectory, name::TileName, version::Int, es::DirSlot, slot::DataSlot)
     try
         e = fetch(es)
-        if e.owner == d.me
-            tv = lock(() -> _serve_version!(d, name, version), d.lock)
-            tv === nothing ? _fail!(slot, ErrorException("tile $(name) version $(version) is not held by its owner, rank $(d.me)")) : _fill!(slot, tv.value)
-        else
-            reqid = lock(d.lock) do
-                d.nextid += 1
-                d.datapending[d.nextid] = slot
-                d.nextid
-            end
-            _dir_deliver!(d, e.owner, DataGet(name, version, d.me, reqid))
+        # also when the owner is this rank: the request goes through the same handler as a remote one (a message to oneself is handled directly), so it finds
+        # a version that is being handed over (it waits) or has left (it is sent on) exactly as a remote reader does
+        reqid = lock(d.lock) do
+            d.nextid += 1
+            d.datapending[d.nextid] = slot
+            d.nextid
         end
+        _dir_deliver!(d, e.owner, DataGet(name, version, d.me, reqid))
     catch err
         _fail!(slot, err isa Exception ? err : ErrorException(string(err)))
     end
@@ -125,11 +142,19 @@ function _tile_fetch_continue(d::TileDirectory, name::TileName, version::Int, es
 end
 
 function dir_handle!(d::TileDirectory, msg::DataGet)
+    key = (msg.name, msg.version)
     reply = lock(d.lock) do
+        mv = get(d.moving, key, nothing)
+        if mv !== nothing
+            push!(mv[2], msg)                                     # the version is being handed over: answer when the new owner has confirmed
+            return nothing
+        end
+        to = get(d.moved, key, nothing)
+        to === nothing || return DataMoved(msg.reqid, msg.name, msg.version, to)
         tv = _serve_version!(d, msg.name, msg.version)
         tv === nothing ? DataMissing(msg.reqid, msg.name, msg.version, d.me) : DataReply(msg.reqid, msg.name, msg.version, tv.value)
     end
-    _dir_deliver!(d, msg.from, reply)
+    reply === nothing || _dir_deliver!(d, msg.from, reply)
     return nothing
 end
 
@@ -142,5 +167,56 @@ end
 function dir_handle!(d::TileDirectory, msg::DataMissing)
     slot = lock(() -> pop!(d.datapending, msg.reqid, nothing), d.lock)
     slot === nothing || _fail!(slot, ErrorException("tile $(msg.name) version $(msg.version) is not held by rank $(msg.owner)"))
+    return nothing
+end
+
+function dir_handle!(d::TileDirectory, msg::DataMoved)
+    slot = lock(() -> get(d.datapending, msg.reqid, nothing), d.lock)   # the request stays pending: it is asked again, at the new owner
+    slot === nothing || _dir_deliver!(d, msg.owner, DataGet(msg.name, msg.version, d.me, msg.reqid))
+    return nothing
+end
+
+"""
+    tile_migrate!(d, name, version, to)
+
+Move version `version` of the tile `name`, which this rank owns, to rank `to` together with the number of fetches it still has to serve. The new owner stores it,
+announces itself in the directory and confirms; requests that reach this rank meanwhile wait and are then sent on to the new owner, and requests that arrive later
+are sent on too. The `done` event of the version here is notified at once ("released here"): the readers that are left are served by the new owner.
+"""
+function tile_migrate!(d::TileDirectory, name::TileName, version::Integer, to::Integer)
+    key = (name, Int(version))
+    to == d.me && return nothing
+    tv = lock(d.lock) do
+        tv = pop!(d.data, key, nothing)
+        tv === nothing && throw(ErrorException("tile $(name) version $(version) is not held by rank $(d.me): cannot migrate it"))
+        d.moving[key] = (Int(to), Any[])
+        tv
+    end
+    notify(tv.done)
+    _dir_deliver!(d, Int(to), DataMove(name, Int(version), tv.value, tv.remaining, d.me))
+    return nothing
+end
+
+function dir_handle!(d::TileDirectory, msg::DataMove)
+    key = (msg.name, msg.version)
+    lock(d.lock) do
+        d.data[key] = TileVersion(msg.value, msg.remaining, Base.Event())    # stored before it is announced
+        delete!(d.moved, key)
+    end
+    dir_put!(d, msg.name, d.me, msg.version)
+    _dir_deliver!(d, msg.from, DataMoveAck(msg.name, msg.version))
+    return nothing
+end
+
+function dir_handle!(d::TileDirectory, msg::DataMoveAck)
+    key = (msg.name, msg.version)
+    to, waiting = lock(d.lock) do
+        to, queued = pop!(d.moving, key)
+        d.moved[key] = to
+        (to, queued)
+    end
+    for g in waiting
+        _dir_deliver!(d, g.from, DataMoved(g.reqid, g.name, g.version, to))
+    end
     return nothing
 end
