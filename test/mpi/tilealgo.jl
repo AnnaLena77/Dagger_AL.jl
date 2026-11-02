@@ -31,4 +31,22 @@
     @test err !== nothing
     Dagger.barrier(; comm)
     @test isempty(d.errors)
+
+    # LU without pivoting
+    Z = rand(n, n) + n * I
+    tilez(i, j) = copy(Z[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb])
+    lures = Dagger.allgather_value(Dagger.tile_lu_nopiv!(d, nt, tilez, owner; space=UInt64(79)); comm)
+    F = zeros(n, n); for res in lures, ((i, j), T) in res; F[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= T; end
+    @test norm((tril(F, -1) + I) * triu(F) - Z) / norm(Z) < 1e-10
+    # matrix product C += A * B on three different layouts
+    mt, ntc, kt = 4, 3, 5
+    Am = rand(mt * nb, kt * nb); Bm = rand(kt * nb, ntc * nb); Cm = rand(mt * nb, ntc * nb)
+    blk(M, i, j) = copy(M[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb])
+    gres = Dagger.allgather_value(Dagger.tile_gemm!(d, mt, ntc, kt, (i, k) -> blk(Am, i, k), (k, j) -> blk(Bm, k, j), (i, j) -> blk(Cm, i, j),
+                                                    (i, k) -> mod(i + k, nranks), (k, j) -> mod(k + 2j, nranks), (i, j) -> mod(i + j, nranks); space=UInt64(80)); comm)
+    G = zeros(mt * nb, ntc * nb); for res in gres, ((i, j), T) in res; G[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= T; end
+    @test norm(G - (Cm + Am * Bm)) / norm(Cm + Am * Bm) < 1e-12
+    Dagger.barrier(; comm)
+    @test isempty(d.errors)
 end
+

@@ -251,4 +251,18 @@ val(v, n=8) = [Float64(1000v + i) for i in 1:n]            # the value of versio
         @test all(d -> isempty(d.errors), values(ds))
         dir_close(net, tasks)
     end
+
+    @testset "version 0 can be asked for before it is published" begin
+        ids = [0, 1]
+        net, ds, tasks = dir_cluster(ids, ids)
+        n = TileName(12, 1)
+        slot = tile_fetch(ds[1], n, 0; owner=0)                            # the owner has published nothing yet: the request waits, it is not an error
+        sleep(0.1)
+        @test !isready(slot)
+        tile_publish!(ds[0], n, 0, val(0); readers=1)
+        @test await(slot) == val(0)
+        @test all(d -> isempty(d.errors), values(ds))
+        dir_close(net, tasks)
+    end
 end
+

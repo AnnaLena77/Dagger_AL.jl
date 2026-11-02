@@ -193,7 +193,7 @@ function dir_handle!(d::TileDirectory, msg::DataGet)
         to = get(d.moved, key, nothing)
         to === nothing || return DataMoved(msg.reqid, msg.name, msg.version, to)
         tv = _serve_version!(d, msg.name, msg.version)
-        if tv === nothing && msg.version > get(d.latest, msg.name, 0)
+        if tv === nothing && msg.version > get(d.latest, msg.name, -1)         # (-1: nothing published yet; version 0 is a version)
             push!(get!(Vector{Any}, d.dwait, key), msg)           # not published yet: answered when it is
             return nothing
         end
