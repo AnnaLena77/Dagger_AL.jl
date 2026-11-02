@@ -17,8 +17,9 @@ Factorize (lower, `A = L L'`) the symmetric positive definite matrix of `nt` x `
 of the lower triangle (called only on its owner, and the result is changed in place), `owner(i, j)` is the identifier of the rank that owns it. Returns the final tiles
 this rank owns after all its tasks have finished. Every rank must call it with the same `nt`, `owner` and `space`.
 """
-function tile_cholesky!(d::TileDirectory, nt::Int, init, owner; space::UInt64=UInt64(1), prefetch::Bool=true)
+function tile_cholesky!(d::TileDirectory, nt::Int, init, owner; space::UInt64=UInt64(1), prefetch::Bool=true, probe=nothing)
     me = d.me
+    kern(kind, f, args...) = probe === nothing ? f(args...) : probe(kind, f, args...)     # `probe(kind, f, args...)` may time the kernel (benchmarks)
     name(i, j) = TileName(space, (j - 1) * nt + i)
     cache = Dict{Tuple{Int,Int},DataSlot}()               # final versions asked for by this rank: once, however many tasks use them
     clock = ReentrantLock()
@@ -48,7 +49,7 @@ function tile_cholesky!(d::TileDirectory, nt::Int, init, owner; space::UInt64=UI
                 cur = let prev = cur, sa = early(j, k)
                     Threads.@spawn guard() do
                         C = fetch(prev); A = fetch(late(sa, j, k))
-                        BLAS.syrk!('L', 'N', -1.0, A, 1.0, C)
+                        kern(3, BLAS.syrk!, 'L', 'N', -1.0, A, 1.0, C)
                         C
                     end
                 end
@@ -56,7 +57,7 @@ function tile_cholesky!(d::TileDirectory, nt::Int, init, owner; space::UInt64=UI
                 cur = let prev = cur, sa = early(i, k), sb = early(j, k)
                     Threads.@spawn guard() do
                         C = fetch(prev); A = fetch(late(sa, i, k)); B = fetch(late(sb, j, k))
-                        BLAS.gemm!('N', 'T', -1.0, A, B, 1.0, C)
+                        kern(4, BLAS.gemm!, 'N', 'T', -1.0, A, B, 1.0, C)
                         C
                     end
                 end
@@ -66,7 +67,7 @@ function tile_cholesky!(d::TileDirectory, nt::Int, init, owner; space::UInt64=UI
             cur = let prev = cur
                 Threads.@spawn guard() do
                     C = fetch(prev)
-                    _, info = LAPACK.potrf!('L', C)
+                    _, info = kern(1, LAPACK.potrf!, 'L', C)
                     info == 0 || throw(LinearAlgebra.PosDefException(Int(info)))
                     Threads.atomic_xchg!(published, true)
                     tile_publish!(d, name(i, j), j, C; readers=-1)     # the final version: published, last
@@ -77,7 +78,7 @@ function tile_cholesky!(d::TileDirectory, nt::Int, init, owner; space::UInt64=UI
             cur = let prev = cur, sl = early(j, j)
                 Threads.@spawn guard() do
                     C = fetch(prev); L = fetch(late(sl, j, j))
-                    BLAS.trsm!('R', 'L', 'T', 'N', 1.0, L, C)
+                    kern(2, BLAS.trsm!, 'R', 'L', 'T', 'N', 1.0, L, C)
                     Threads.atomic_xchg!(published, true)
                     tile_publish!(d, name(i, j), j, C; readers=-1)
                     C
