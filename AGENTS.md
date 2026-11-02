@@ -1814,3 +1814,22 @@ lesson.
    Distributed suite aborts at the first failing group, so a "13 minute" run was an
    aborted one -- compare per-group times of runs that finished the same groups,
    and read the summary columns (`Pass Broken Total` is not `Pass Fail Total`).
+
+149. **First-use compilation is a latency on the critical path, and a rank that joins is
+   all first use.** Barnes-Hut on Otus stalled half of its ranks 0.22-0.24 s in the first
+   step that needed a longer merge (counters: 99.7 % compilation), because Dagger's typed
+   submit path compiles `_eager_launch!`, `_spawn` and `_typed_spawn_owned` anew for every
+   new tuple of argument types, i.e. every new length of a splat (80-140 ms on a laptop;
+   the untyped path 8-12 ms; steady state the same, 10-14 us per task). The cost
+   cannot be removed by warming up alone when the shapes depend on the distribution of
+   the data -- and with ranks that join or leave the distribution changes mid-run, so
+   every rank can meet a new length at any time. Rules: (a) keep the submit path
+   cheap to specialize (above `TYPED_SPAWN_MAX_ARGS` and with `@nospecialize` the
+   cost per new shape fell 10x / 1.5x); (b) a rank that joins must run a warm-up
+   workload (dummy tiles, every kernel and task shape it will see) *before* the others
+   count on it, or its first steps are seconds of compilation that all other ranks wait
+   for in a collective (the 15.7 s first step of Barnes-Hut had 58-64 s of compile time
+   summed over threads); (c) a precompile workload or a system image shipped to all
+   nodes is the standard answer on HPC; (d) measure with `Base.cumulative_compile_timing(true)`
+   switched on (a counter that was never enabled reads 0.0 everywhere and looks like proof
+   that nothing compiles).
