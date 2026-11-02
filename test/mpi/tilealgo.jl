@@ -9,17 +9,26 @@
     pr = max(1, floor(Int, sqrt(nranks))); while nranks % pr != 0; pr -= 1; end; pc = nranks ÷ pr
     owner(i, j) = mod(i - 1, pr) * pc + mod(j - 1, pc)      # a 2D cyclic grid of the ranks
     tile(i, j) = copy(A[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb])
-    mine = Dagger.tile_cholesky!(d, nt, tile, owner; space=UInt64(77))
-    @test all(ij -> owner(ij...) == me, keys(mine))
-    @test length(mine) == count(ij -> owner(ij...) == me, [(i, j) for j in 1:nt for i in j:nt])
-    all_tiles = Dagger.allgather_value(mine; comm)         # cooperative: the directory service must keep answering the other ranks
-    L = zeros(n, n)
-    for res in all_tiles, ((i, j), T) in res
-        L[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= T
+    # Received arrays are recycled: the first factorization fills the pool, the second one receives into the same arrays. With TILE_POISON a released array is filled with NaN, so a task that
+    # still read it (a release too early) makes the result wrong instead of silently using another tile's data.
+    Dagger.TILE_POISON[] = true
+    hits0 = Dagger.TILE_POOL_HITS[]
+    for (rep, space) in enumerate((UInt64(77), UInt64(177)))
+        mine = Dagger.tile_cholesky!(d, nt, tile, owner; space)
+        @test all(ij -> owner(ij...) == me, keys(mine))
+        @test length(mine) == count(ij -> owner(ij...) == me, [(i, j) for j in 1:nt for i in j:nt])
+        all_tiles = Dagger.allgather_value(mine; comm)         # cooperative: the directory service must keep answering the other ranks
+        L = zeros(n, n)
+        for res in all_tiles, ((i, j), T) in res
+            L[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= T
+        end
+        L = LowerTriangular(L)
+        @test all(isfinite, L)
+        @test norm(L * L' - A) / norm(A) < 1e-12
+        @test norm(L - cholesky(Symmetric(A, :L)).L) / norm(L) < 1e-10
+        Dagger.barrier(; comm)
     end
-    L = LowerTriangular(L)
-    @test norm(L * L' - A) / norm(A) < 1e-12
-    @test norm(L - cholesky(Symmetric(A, :L)).L) / norm(L) < 1e-10
+    nranks > 1 && @test sum(Dagger.allgather_value(Dagger.TILE_POOL_HITS[] - hits0; comm)) > 0     # the pool really was used
     @test isempty(d.errors)
 
     # a matrix that is not positive definite: every rank gets an error (named), nobody waits for a tile that will never be published
@@ -48,5 +57,5 @@
     @test norm(G - (Cm + Am * Bm)) / norm(Cm + Am * Bm) < 1e-12
     Dagger.barrier(; comm)
     @test isempty(d.errors)
+    Dagger.TILE_POISON[] = false
 end
-

@@ -29,7 +29,9 @@ struct DataReply
     name::TileName
     version::Int
     value::Any
+    owned::Bool          # the receiver owns the array (a copy that came over the network) and may give it back to the pool when it is done with it
 end
+DataReply(reqid::Int, name::TileName, version::Int, value) = DataReply(reqid, name, version, value, false)
 "The version left this rank: ask `owner`."
 struct DataMoved
     reqid::Int
@@ -87,7 +89,9 @@ mutable struct DataSlot
     const ev::Base.Event
     @atomic value::Any
     @atomic err::Union{Nothing,Exception}
-    DataSlot() = new(Base.Event(), nothing, nothing)
+    recyclable::Bool                  # the value is a received copy the slot's users may give back (see `slot_unref!`)
+    const refs::Threads.Atomic{Int}   # users of the value that have not finished (the creator holds one until it has handed the slot to every user)
+    DataSlot() = new(Base.Event(), nothing, nothing, false, Threads.Atomic{Int}(1))
 end
 Base.wait(s::DataSlot) = (wait(s.ev); nothing)
 Base.isready(s::DataSlot) = (@atomic :acquire s.err) !== nothing || (@atomic :acquire s.value) !== nothing
@@ -220,7 +224,10 @@ end
 function dir_handle!(d::TileDirectory, msg::DataReply)
     tile_trace!(5, msg.reqid)                                              # the reply (with its payload) is at the reader
     slot = lock(() -> pop!(d.datapending, msg.reqid, nothing), d.lock)
-    slot === nothing || _fill!(slot, msg.value)
+    if slot !== nothing
+        slot.recyclable = msg.owned
+        _fill!(slot, msg.value)
+    end
     tile_trace!(6, msg.reqid)
     return nothing
 end
@@ -285,3 +292,52 @@ end
 "Publish that producing version `version` of the tile `name` failed with `ex`: every reader of that version gets the exception."
 tile_publish_failure!(d::TileDirectory, name::TileName, version::Integer, ex) =
     tile_publish!(d, name, version, TileFailure(ex isa Exception ? ex : ErrorException(string(ex))); readers=-1)
+
+# --- recycling of received arrays -------------------------------------------------------------------------------------------------------------
+# A pull over the network allocates the array it receives into; fresh memory is touched for the first time by the receive (page faults, registration with the NIC) and
+# was 3-10x slower than a receive into an array that has been used before (Fulda, 512 KB: mean 1.6-2.3 ms against 0.13-0.17 ms, job 9876). So received arrays go back to a pool when
+# their users are done and the next receive of that type and size takes one. The owner of an array is the receiver (`DataReply.owned`); a value that came from the owner's own
+# store in this process is never recycled. Whoever hands a slot to several users counts them (`slot_ref!`), every user calls `slot_unref!` when it is finished, the creator
+# calls it once after the last hand-over: the last one gives the array back. A use after the release would read an array that has been given to another pull, so tests set
+# `TILE_POISON` and the released array is filled with NaN first.
+
+const TILE_POOL_MAX_PER_KEY = 256
+"How many receives found a pooled array (tests assert on it: without the pool everything still works, only slower)."
+const TILE_POOL_HITS = Threads.Atomic{Int}(0)
+"Test aid: fill an array with NaN when it is given back (a late reader then fails loudly instead of reading another tile's data)."
+const TILE_POISON = Ref(false)
+
+"A pooled array of type `T` and size `dims` for a receive, or `nothing`."
+function tile_pool_take!(d::TileDirectory, ::Type{T}, dims::Tuple) where T
+    lock(d.lock) do
+        v = get(d.pool, (T, dims), nothing)
+        if v === nothing || isempty(v)
+            nothing
+        else
+            Threads.atomic_add!(TILE_POOL_HITS, 1)
+            pop!(v)
+        end
+    end
+end
+
+"Give `arr` back to the pool of `d`. The caller guarantees nothing reads it any more."
+function tile_release!(d::TileDirectory, arr::AbstractArray)
+    TILE_POISON[] && eltype(arr) <: AbstractFloat && fill!(arr, eltype(arr)(NaN))
+    lock(d.lock) do
+        v = get!(Vector{Any}, d.pool, (eltype(arr), size(arr)))
+        length(v) < TILE_POOL_MAX_PER_KEY && push!(v, arr)
+    end
+    return nothing
+end
+
+"Another user of the slot's value is about to be started."
+slot_ref!(s::DataSlot) = (Threads.atomic_add!(s.refs, 1); s)
+
+"A user of the slot's value is done with it (or the creator has handed it to all users); the last one gives a received array back to the pool."
+function slot_unref!(d::TileDirectory, s::DataSlot)
+    if Threads.atomic_sub!(s.refs, 1) == 1 && s.recyclable
+        v = @atomic :acquire s.value
+        v isa AbstractArray && tile_release!(d, v)
+    end
+    return nothing
+end

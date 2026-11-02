@@ -68,6 +68,7 @@ mutable struct TileDirectory
     const datapending::Dict{Int,Any}            # data requests this rank has sent and not had answered
     const moving::Dict{Tuple{TileName,Int},Tuple{Int,Vector{Any}}}   # versions on their way to another rank: (target, requests that arrived meanwhile)
     const moved::Dict{Tuple{TileName,Int},Int}  # versions that left this rank: where they went (a stale reader is sent on)
+    const pool::Dict{Tuple{DataType,Tuple},Vector{Any}}   # received arrays that are free again (src/tilestore.jl), by (element type, size)
     const latest::Dict{TileName,Int}            # the highest version of each tile this rank has published
     const dwait::Dict{Tuple{TileName,Int},Vector{Any}}   # data requests for a version that is not published yet (a reader that knows the owner asks it directly)
     TileDirectory(me::Integer, ranks, tr::DirTransport) =
@@ -75,7 +76,7 @@ mutable struct TileDirectory
             Dict{Int,DirSlot}(), Dict{TileName,DirEntry}(), 0, Threads.Atomic{Int}(0), Any[], 0, Any[],
             Dict{Tuple{TileName,Int},Any}(), Dict{Int,Any}(),
             Dict{Tuple{TileName,Int},Tuple{Int,Vector{Any}}}(), Dict{Tuple{TileName,Int},Int}(),
-            Dict{TileName,Int}(), Dict{Tuple{TileName,Int},Vector{Any}}())
+            Dict{Tuple{DataType,Tuple},Vector{Any}}(), Dict{TileName,Int}(), Dict{Tuple{TileName,Int},Vector{Any}}())
 end
 
 @inline _home(d::TileDirectory, name::TileName) = tile_home(name, d.ranks)

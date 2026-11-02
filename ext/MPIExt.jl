@@ -4149,8 +4149,9 @@ function dir_service_loop(s::MPIDirService)
             m = Serialization.deserialize(IOBuffer(buf))
             if m isa Dagger.DataReplyBulk
                 Dagger.tile_trace!(4, m.reqid)                       # the header of the reply is at the reader
-                arr = Array{m.T}(undef, m.dims)
-                push!(s.bulk, (MPI.Irecv!(arr, comm; source=MPI.Get_source(stat), tag=DIR_BULK_TAG), Dagger.DataReply(m.reqid, m.name, m.version, arr)))
+                arr = Dagger.tile_pool_take!(s.d, m.T, m.dims)         # an array that was used before: first touch and NIC registration are done
+                arr === nothing && (arr = Array{m.T}(undef, m.dims))
+                push!(s.bulk, (MPI.Irecv!(arr, comm; source=MPI.Get_source(stat), tag=DIR_BULK_TAG), Dagger.DataReply(m.reqid, m.name, m.version, arr, true)))
             else
                 try
                     Dagger.dir_handle!(s.d, m)
