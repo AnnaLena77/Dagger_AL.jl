@@ -60,9 +60,12 @@ mutable struct TileDirectory
     nextid::Int
     const sent::Threads.Atomic{Int}             # messages that went over the transport (a lookup at the home sends none)
     const errors::Vector{Any}                   # exceptions of the handler (a failing handler must not vanish silently)
+    const data::Dict{Tuple{TileName,Int},Any}   # the versions of tiles this rank owns and that readers may still fetch (src/tilestore.jl)
+    const datapending::Dict{Int,Any}            # data requests this rank has sent and not had answered
     TileDirectory(me::Integer, ranks, tr::DirTransport) =
         new(Int(me), sort!(collect(Int, ranks)), tr, ReentrantLock(), Dict{TileName,DirEntry}(), Dict{TileName,Vector{DirGet}}(),
-            Dict{Int,DirSlot}(), Dict{TileName,DirEntry}(), 0, Threads.Atomic{Int}(0), Any[])
+            Dict{Int,DirSlot}(), Dict{TileName,DirEntry}(), 0, Threads.Atomic{Int}(0), Any[],
+            Dict{Tuple{TileName,Int},Any}(), Dict{Int,Any}())
 end
 
 @inline _home(d::TileDirectory, name::TileName) = tile_home(name, d.ranks)

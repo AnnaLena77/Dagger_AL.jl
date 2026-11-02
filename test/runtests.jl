@@ -29,6 +29,7 @@ tests = [
     ("TileFlow Regions", "datadeps_tileflow.jl"),
     ("Tile Names", "tilenames.jl"),
     ("Tile Directory", "tiledir.jl"),
+    ("Tile Store", "tilestore.jl"),
     ("Dynamic Loop", "bulk.jl"),
     ("NUMA Map", "numa.jl"),
     ("Processor Grids", "procgrid.jl"),
