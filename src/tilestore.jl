@@ -96,11 +96,24 @@ is notified when `readers` fetches have been served (at once when `readers == 0`
 """
 function tile_publish!(d::TileDirectory, name::TileName, version::Integer, value; readers::Integer=-1)
     tv = TileVersion(value, Int(readers), Base.Event())
-    if readers == 0
-        notify(tv.done)                                           # nobody reads it: nothing to keep
-    else
-        lock(() -> d.data[(name, Int(version))] = tv, d.lock)
+    key = (name, Int(version))
+    replies = Tuple{Int,Any}[]
+    lock(d.lock) do
+        d.latest[name] = max(get(d.latest, name, 0), Int(version))
+        if readers == 0
+            notify(tv.done)                                       # nobody reads it: nothing to keep
+        else
+            d.data[key] = tv
+        end
+        ws = pop!(d.dwait, key, nothing)                          # readers that asked this owner before the version existed
+        if ws !== nothing
+            for g in ws
+                sv = _serve_version!(d, name, Int(version))
+                push!(replies, (g.from, sv === nothing ? DataMissing(g.reqid, name, Int(version), d.me) : DataReply(g.reqid, name, Int(version), sv.value)))
+            end
+        end
     end
+    for (to, m) in replies; _dir_deliver!(d, to, m); end
     dir_put!(d, name, d.me, version)
     return tv
 end
@@ -113,12 +126,24 @@ function tile_drop!(d::TileDirectory, name::TileName, version::Integer)
 end
 
 """
-    tile_fetch(d, name, version) -> DataSlot
+    tile_fetch(d, name, version; owner=nothing) -> DataSlot
 
-Fetch version `version` of the tile `name`: wait until it is announced, ask its owner (nothing is sent when the owner is this rank) and deliver the value.
+Fetch version `version` of the tile `name`: wait until it is announced, ask its owner (nothing is sent when the owner is this rank) and deliver the value. With
+`owner` given the directory is not asked at all.
 """
-function tile_fetch(d::TileDirectory, name::TileName, version::Integer)
+function tile_fetch(d::TileDirectory, name::TileName, version::Integer; owner::Union{Nothing,Integer}=nothing)
     slot = DataSlot()
+    if owner !== nothing
+        # The caller knows the owner (a fixed layout, as in HPX's partitioned vectors): no lookup, one round trip. The owner holds the request until it has
+        # published the version, and forwards it if the tile has moved. A wrong owner that never publishes this tile leaves the request waiting.
+        reqid = lock(d.lock) do
+            d.nextid += 1
+            d.datapending[d.nextid] = slot
+            d.nextid
+        end
+        _dir_deliver!(d, Int(owner), DataGet(name, Int(version), d.me, reqid))
+        return slot
+    end
     es = dir_future(d, name; minversion=version)
     Threads.@spawn _tile_fetch_continue(d, name, Int(version), es, slot)
     return slot
@@ -152,6 +177,10 @@ function dir_handle!(d::TileDirectory, msg::DataGet)
         to = get(d.moved, key, nothing)
         to === nothing || return DataMoved(msg.reqid, msg.name, msg.version, to)
         tv = _serve_version!(d, msg.name, msg.version)
+        if tv === nothing && msg.version > get(d.latest, msg.name, 0)
+            push!(get!(Vector{Any}, d.dwait, key), msg)           # not published yet: answered when it is
+            return nothing
+        end
         tv === nothing ? DataMissing(msg.reqid, msg.name, msg.version, d.me) : DataReply(msg.reqid, msg.name, msg.version, tv.value)
     end
     reply === nothing || _dir_deliver!(d, msg.from, reply)

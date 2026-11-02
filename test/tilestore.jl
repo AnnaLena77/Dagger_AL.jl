@@ -224,4 +224,31 @@ val(v, n=8) = [Float64(1000v + i) for i in 1:n]            # the value of versio
         @test all(d -> isempty(d.errors), values(ds))
         dir_close(net, tasks)
     end
+
+    @testset "a reader that knows the owner asks it directly and waits there for the version" begin
+        ids = [0, 1, 2, 3]
+        net, ds, tasks = dir_cluster(ids, ids)
+        n = TileName(11, 1)
+        slot = tile_fetch(ds[2], n, 3; owner=1)                           # no lookup: straight to rank 1, which has not published anything yet
+        sleep(0.1)
+        @test !isready(slot)
+        @test lock(() -> haskey(ds[1].dwait, (n, 3)), ds[1].lock)         # held at the owner
+        s0 = total_sent(ds)
+        tile_publish!(ds[1], n, 1, val(1); readers=0)                      # an earlier version does not answer it
+        sleep(0.05)
+        @test !isready(slot)
+        tile_publish!(ds[1], n, 3, val(3); readers=2)
+        @test await(slot) == val(3)
+        @test await(tile_fetch(ds[0], n, 3; owner=1)) == val(3)           # published already: answered at once
+        @test timedwait(() -> lock(() -> isempty(ds[1].data), ds[1].lock), 5.0; pollint=0.005) === :ok
+        # a hinted request for a version that is gone is an error, not a wait
+        e = try; await(tile_fetch(ds[0], n, 3; owner=1)); nothing; catch err; err; end
+        @test e isa ErrorException && occursin("not held", e.msg)
+        # and a request to the old owner of a tile that moved is sent on
+        tile_publish!(ds[1], n, 4, val(4); readers=1)
+        tile_migrate!(ds[1], n, 4, 3)
+        @test await(tile_fetch(ds[2], n, 4; owner=1)) == val(4)
+        @test all(d -> isempty(d.errors), values(ds))
+        dir_close(net, tasks)
+    end
 end

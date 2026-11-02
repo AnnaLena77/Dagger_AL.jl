@@ -11,10 +11,11 @@ function chol_case(ids, nt, nb, owner; seed=1)
     net, ds, tasks = dir_cluster(ids, ids)
     tile(i, j) = copy(A[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb])
     results = Dict{Int,Any}()
+    rlock = ReentrantLock()
     runs = map(ids) do r
         Threads.@spawn begin
             res = tile_cholesky!(ds[r], nt, tile, owner)
-            lock(() -> results[r] = res, ReentrantLock())
+            lock(() -> results[r] = res, rlock)
         end
     end
     foreach(fetch, runs)
