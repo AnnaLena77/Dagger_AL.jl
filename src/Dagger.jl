@@ -107,6 +107,7 @@ include("tileflow.jl")
 include("tilenames.jl")
 include("tiledir.jl")
 include("tilestore.jl")
+include("tilealgo.jl")
 include("numa.jl")
 
 # Data dependency task queue
