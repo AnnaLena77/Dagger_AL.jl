@@ -1,4 +1,4 @@
-# A `spawn_datadeps` region executed on the TileFlow layer (src/tileflow.jl).  Opt-in (JULIA_DAGGER_TILEFLOW_REGIONS=1 or `Dagger.tileflow_regions!(true)`).
+# A `spawn_datadeps` region executed on the TileFlow layer (src/tileflow.jl).  On by default; off with JULIA_DAGGER_TILEFLOW_REGIONS=0 or `Dagger.tileflow_regions!(false)`.
 #
 # The region is recorded as usual (every `@spawn` becomes a `DTaskPair` in `queue.seen_tasks`); before the Datadeps planner starts, `tileflow_region!`
 # asks whether the WHOLE region can run on the tile layer.  It can when every task has default options and only these arguments:
