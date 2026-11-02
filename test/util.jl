@@ -85,3 +85,15 @@ macro grab_output(ex)
         end
     end
 end
+
+# Run `f` with the TileFlow bridge for `spawn_datadeps` switched off. For tests of the Datadeps planner itself (the copies it plans, the thread it picks):
+# the bridge bypasses the planner by design, so with it on those tests would measure something else.
+function with_planner(f)
+    old = Dagger.TILEFLOW_REGIONS[]
+    Dagger.tileflow_regions!(false)
+    try
+        return f()
+    finally
+        Dagger.tileflow_regions!(old)
+    end
+end

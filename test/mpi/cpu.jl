@@ -691,6 +691,7 @@ function count_move_tasks(logs)
 end
 read_only(X) = (sum(X); nothing)
 
+with_planner() do   # the copies the Datadeps planner makes (the bridge plans none)
 @testset "Copy planning" begin
     r1 = min(1, nranks-1)
     cross = r1 != 0 # single-rank runs degenerate to zero copies
@@ -735,6 +736,7 @@ read_only(X) = (sum(X); nothing)
     if rank == 0
         @test D == fill(4.0, 4, 4)
     end
+end
 end
 
 @testset "Error propagation" begin

@@ -3,6 +3,7 @@
 # critical path (`DATADEPS_AVOID_DRIVER`).
 tid_of!(a::Vector{Float64}) = (a[1] += 1; Threads.threadid())
 
+with_planner() do   # a property of the Datadeps planner: the bridge places its kernels itself
 @testset "Datadeps avoids the driver thread" begin
     if Threads.nthreads() >= 3
         old = Dagger.DATADEPS_AVOID_DRIVER[]
@@ -26,5 +27,6 @@ tid_of!(a::Vector{Float64}) = (a[1] += 1; Threads.threadid())
             Dagger.DATADEPS_AVOID_DRIVER[] = old
         end
     end
+end
 end
 Dagger.barrier(; comm)
