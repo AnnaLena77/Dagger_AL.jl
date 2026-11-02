@@ -148,6 +148,7 @@ function _region_plan(queue, tr, np::Int, accel)
         fn = value(a1)
         template = Any[]; kwargs = Pair{Symbol,Any}[]; slots = Tuple{Int,Bool}[]
         last = 0                              # positions need only ascend (a typed spec starts at 2, an untyped one at 1)
+        hasdep = false                        # a task declares a dependency (In/Out/InOut/Deps) on a tile, or it is not about data flow at all
         for a in fa
             (ispositional(a) && a.pos.idx != 0) || continue
             a.pos.idx > last || return _region_no("positional arguments out of order")
@@ -158,6 +159,7 @@ function _region_plan(queue, tr, np::Int, accel)
             c0 = v0 isa DTask ? get(memo, v0, nothing) : v0
             fid = (c0 isa Chunk || c0 isa Array) ? get(seen, c0, 0) : 0
             if fid != 0
+                hasdep |= v0 !== v
                 push!(slots, (fid, wr)); push!(template, RegionSlot(length(slots)))
                 continue
             end
@@ -167,6 +169,7 @@ function _region_plan(queue, tr, np::Int, accel)
                 push!(template, c[2])
             else
                 _, key, tile, write = c
+                hasdep |= v isa Union{In,Out,InOut,Deps}
                 id = get(index, key, 0)
                 if id == 0
                     push!(tiles, tile); id = length(tiles); index[key] = id
@@ -184,6 +187,9 @@ function _region_plan(queue, tr, np::Int, accel)
             push!(kwargs, pos_kw(a) => c[2])
         end
         isempty(slots) && return _region_no("a task without a tile argument")
+        # A task whose tile arguments are all bare produces a block or a value for others to use (the tasks that make the blocks of a DArray are of this
+        # kind): its result must stay an ordinary `Chunk` with a location, which a lowered task does not give. Only data flow is lowered.
+        hasdep || return _region_no("a task without a declared dependency (In/Out/InOut) on a tile")
         w = findfirst(s -> s[2], slots)
         rank = scope_rank !== nothing ? scope_rank : tiles[(w === nothing ? slots[1] : slots[w])[1]].owner
         (0 <= rank < np) || return _region_no("a scope names rank $rank, outside the transport")
