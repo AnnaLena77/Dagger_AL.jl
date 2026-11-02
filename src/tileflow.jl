@@ -43,58 +43,67 @@ mutable struct TileSpace
     holders::Vector{UInt64}             # replicated: bit r set = rank r holds the current version
     version::Vector{Int32}              # replicated
     tiles::Vector{Union{Nothing,LocalTile}}
-    own::Function                       # id -> rank that owns the data initially
-    tsize::Function                     # id -> (m, n) of the tile (needed to allocate receive buffers)
-    T::DataType                         # element type of every tile (an isbits type, so that tiles are plain buffers)
+    own::Function                       # id -> rank that owns the data initially (and runs the tasks that write it first)
+    tsize::Function                     # id -> dims (a tuple) of the tile: needed to allocate receive buffers
+    types::Function                     # id -> element type of the tile (an isbits type, so that tiles are plain buffers)
+    homes::Vector{UInt64}               # ranks whose ORIGINAL array must hold the final version (`tile_restore!`); bit(own) for an ordinary tile
+    origs::Vector{Any}                  # the array each rank started with (nothing where it has none)
     pairseq::Vector{Int}                # np*np sequence numbers of transfers per (sender, dest)
     ntasks::Int; nown::Int; nxfer::Int; nsent::Int; nrecv::Int
     all_tasks::Vector{Any}
-    pool::Dict{Tuple{Int,Int},Vector{Matrix}}
+    pool::Dict{Tuple{DataType,Tuple},Vector{Any}}
     pool_lock::ReentrantLock
 end
 
 """
-    TileSpace(ntiles, own, tsize, init; transport=LocalTileTransport())
+    TileSpace(ntiles, own, tsize, init; T=Float64, types=nothing, initial=nothing, homes=nothing, transport=...)
 
-A set of `ntiles` tiles identified by `1:ntiles`.  `own(id)` is the rank that initially holds tile `id`, `tsize(id)` its size `(m, n)` (Float64
-matrices), `init(id)` creates it (called on the owner, from many threads: first touch of the memory should be spread over the machine).
+A set of `ntiles` tiles identified by `1:ntiles`.  `own(id)` is the rank that initially holds tile `id`, `tsize(id)` its dimensions as a tuple (any rank),
+`init(id)` creates it (called on the owner, from many threads: first touch of the memory should be spread over the machine).  The element type is `T`,
+or `types(id)` per tile.  A tile can start on several ranks (`initial(id)`: a bitmask, for small arrays every rank has its own copy of) and
+`homes(id)` says on which ranks the final version must end up in the array they started with (`tile_restore!`); both default to the owner.
 Every rank must build the same space and make the same `tile_spawn!` calls in the same order.
 """
-function TileSpace(ntiles::Int, own::Function, tsize::Function, init::Function; T::DataType=Float64, transport::TileTransport=tile_transport(current_acceleration()))
-    isbitstype(T) || throw(ArgumentError("TileSpace needs an isbits element type, got $T"))
+function TileSpace(ntiles::Int, own::Function, tsize::Function, init::Function; T::DataType=Float64, types=nothing, initial=nothing, homes=nothing,
+                   transport::TileTransport=tile_transport(current_acceleration()))
     me = tile_rank(transport); np = tile_nranks(transport)
     np <= 64 || throw(ArgumentError("TileSpace supports at most 64 ranks (holder bitmask)"))
+    tfun = types === nothing ? (id -> T) : types
+    isbitstype(T) || throw(ArgumentError("TileSpace needs an isbits element type, got $T"))
     sp = TileSpace(transport, me, np, fill(UInt64(0), ntiles), zeros(Int32, ntiles), Vector{Union{Nothing,LocalTile}}(nothing, ntiles),
-                   own, tsize, T, zeros(Int, np * np), 0, 0, 0, 0, 0, Any[], Dict{Tuple{Int,Int},Vector{Matrix}}(), ReentrantLock())
+                   own, tsize, tfun, fill(UInt64(0), ntiles), Vector{Any}(nothing, ntiles), zeros(Int, np * np), 0, 0, 0, 0, 0, Any[],
+                   Dict{Tuple{DataType,Tuple},Vector{Any}}(), ReentrantLock())
     mine = Int[]
     for id in 1:ntiles
         o = own(id); (0 <= o < np) || throw(ArgumentError("own($id) = $o is not a rank of 0:$(np-1)"))
-        sp.holders[id] = UInt64(1) << o
-        o == me && push!(mine, id)
+        m0 = initial === nothing ? UInt64(1) << o : UInt64(initial(id))
+        sp.holders[id] = m0
+        sp.homes[id] = homes === nothing ? UInt64(1) << o : UInt64(homes(id))
+        (m0 >> me) & 1 == 1 && push!(mine, id)
     end
     # first touch by many threads: on a NUMA machine the creating thread would otherwise put every tile in one domain
     tl = Vector{Any}(undef, length(mine))
     Threads.@threads :static for i in eachindex(mine)
         tl[i] = init(mine[i])
     end
-    for (i, id) in enumerate(mine); sp.tiles[id] = LocalTile(tl[i], false, nothing, Any[]); end
+    for (i, id) in enumerate(mine); sp.tiles[id] = LocalTile(tl[i], false, nothing, Any[]); sp.origs[id] = tl[i]; end
     return sp
 end
 
-function _pool_take(sp::TileSpace, m, n)
+function _pool_take(sp::TileSpace, ::Type{T}, dims::Tuple) where T
     lock(sp.pool_lock) do
-        v = get(sp.pool, (m, n), nothing)
-        (v !== nothing && !isempty(v)) ? pop!(v) : Matrix{sp.T}(undef, m, n)
+        v = get(sp.pool, (T, dims), nothing)
+        (v !== nothing && !isempty(v)) ? pop!(v) : Array{T}(undef, dims...)
     end
 end
-function _pool_give(sp::TileSpace, a::Matrix)
+function _pool_give(sp::TileSpace, a::AbstractArray)
     lock(sp.pool_lock) do
-        push!(get!(Vector{Matrix}, sp.pool, size(a)), a)
+        push!(get!(Vector{Any}, sp.pool, (eltype(a), size(a))), a)
     end
     return nothing
 end
 
-struct _TileRelease; sp::TileSpace; arr::Matrix; end
+struct _TileRelease; sp::TileSpace; arr::Any; end
 (r::_TileRelease)(deps...) = _pool_give(r.sp, r.arr)
 struct _TileRunner; f::Any; arrs::Vector{Any}; end
 (g::_TileRunner)(deps...) = (g.f(g.arrs...); nothing)
@@ -106,6 +115,31 @@ _tile_wait(ev) = (wait(ev); nothing)
 "Thread pool for the communication tasks (sends, waits for receives, the MPI progress task): `:interactive` keeps them off the worker threads, whose kernels never yield. Set from JULIA_DAGGER_TILE_COMM_POOL in `__init__`."
 const TILE_COMM_POOL = Ref(:interactive)
 const TAG_MOD = 4_000_000     # tags stay below Open MPI's tag_ub (8388607); matching is by (pair, tag) order, tags are unique per pair in flight
+
+# Make rank `r` hold the current version of tile `id`: decided identically on every rank (sender = lowest holder, tag = per-pair sequence number),
+# only the sender and the receiver do anything.
+function _tile_ensure!(sp::TileSpace, id::Int, r::Int)
+    rbit = UInt64(1) << r
+    h = sp.holders[id]
+    h & rbit != 0 && return
+    me = sp.me
+    sender = trailing_zeros(h)
+    k = sender * sp.np + r + 1
+    sp.pairseq[k] += 1; tag = sp.pairseq[k] % TAG_MOD
+    sp.nxfer += 1
+    if me == sender
+        t = sp.tiles[id]::LocalTile
+        st = light_spawn_on(TILE_COMM_POOL[], _tile_send, sp.tr, t.arr, r, tag, t.ready === nothing ? nothing : LightAfter(t.ready))
+        push!(t.readers, st); push!(sp.all_tasks, st); sp.nsent += 1
+    elseif me == r
+        arr = _pool_take(sp, sp.types(id), sp.tsize(id))
+        ev = tile_post_recv(sp.tr, arr, sender, tag)          # posted now, in program order: rendezvous sends find their receive at once
+        rt = light_spawn_on(TILE_COMM_POOL[], _tile_wait, ev)
+        sp.tiles[id] = LocalTile(arr, true, rt, Any[]); sp.nrecv += 1
+    end
+    sp.holders[id] = h | rbit
+    return
+end
 
 """
     tile_spawn!(space, f, args...; at=nothing)
@@ -124,28 +158,7 @@ function tile_spawn!(sp::TileSpace, f, args::Union{TileIn,TileRW}...; at::Union{
     end
     # the task's rank for a tile that moved: a tile always lives where it was last written, not where it started
     me = sp.me; rbit = UInt64(1) << r
-    for a in args
-        id = a.id
-        h = sp.holders[id]
-        if h & rbit == 0
-            sender = trailing_zeros(h)
-            k = sender * sp.np + r + 1
-            sp.pairseq[k] += 1; tag = sp.pairseq[k] % TAG_MOD
-            sp.nxfer += 1
-            if me == sender
-                t = sp.tiles[id]::LocalTile
-                st = light_spawn_on(TILE_COMM_POOL[], _tile_send, sp.tr, t.arr, r, tag, t.ready === nothing ? nothing : LightAfter(t.ready))
-                push!(t.readers, st); push!(sp.all_tasks, st); sp.nsent += 1
-            elseif me == r
-                m, n = sp.tsize(id)
-                arr = _pool_take(sp, m, n)
-                ev = tile_post_recv(sp.tr, arr, sender, tag)          # posted now, in program order: rendezvous sends find their receive at once
-                rt = light_spawn_on(TILE_COMM_POOL[], _tile_wait, ev)
-                sp.tiles[id] = LocalTile(arr, true, rt, Any[]); sp.nrecv += 1
-            end
-            sp.holders[id] = h | rbit
-        end
-    end
+    for a in args; _tile_ensure!(sp, a.id, r); end
     if me == r
         sp.nown += 1
         deps = Any[]; arrs = Any[]
@@ -248,3 +261,30 @@ tile_chunk_owner(c::Chunk) = c.handle isa MemPool.DRef && c.handle.owner == myid
 tile_chunk_array(c::Chunk) = c.handle isa MemPool.DRef ? MemPool.poolget(c.handle) : nothing
 "`tile_chunk_transport_ok(tr, chunk)`: whether the chunk belongs to the communicator of `tr`."
 tile_chunk_transport_ok(tr::TileTransport, c::Chunk) = tr isa LocalTileTransport
+
+"""
+    tile_restore!(space)
+
+Finish a computation: wait for everything, then make every tile's final version end up in the array each rank started with (`homes`): a tile that was
+last written on another rank is sent back, a tile that lives in a received buffer is copied into the original array. A tile nobody wrote is untouched.
+This is what makes the result visible through the `DArray` (or the small array) the tiles came from. Call it on every rank.
+"""
+function tile_restore!(sp::TileSpace)
+    tile_sync!(sp)                                    # nothing may still read or write an original array
+    n = length(sp.holders)
+    for id in 1:n
+        hm = sp.homes[id]
+        hm == 0 && continue
+        for r in 0:sp.np-1
+            (hm >> r) & 1 == 1 && _tile_ensure!(sp, id, r)
+        end
+    end
+    tile_sync!(sp)                                    # the transfers are done
+    ids = [id for id in 1:n if (sp.homes[id] >> sp.me) & 1 == 1 && sp.origs[id] !== nothing && sp.tiles[id] !== nothing &&
+                               (sp.tiles[id]::LocalTile).arr !== sp.origs[id]]
+    Threads.@threads :static for i in eachindex(ids)
+        id = ids[i]
+        copyto!(sp.origs[id], (sp.tiles[id]::LocalTile).arr)
+    end
+    return nothing
+end

@@ -116,6 +116,24 @@ function tileflow_checks(me::Int, np::Int)
         Dagger.tile_spawn!(sp2, A -> (A[1] = 5.0; nothing), Dagger.TileRW(1))
         @test Dagger.tile_sync!(sp2) === nothing
     end
+    @testset "restore: a tile written on another rank ends up in its original array" begin
+        # tile 1 starts on rank 0, tile 2 on the last rank; one task writes BOTH (it runs on rank 0, so tile 2 travels there)
+        A1 = fill(1.0, 3, 3); A2 = fill(2.0, 3, 3)
+        mine = Dict(1 => A1, 2 => A2)
+        sp = Dagger.TileSpace(2, id -> id == 1 ? 0 : np - 1, id -> (3, 3), id -> mine[id])
+        Dagger.tile_spawn!(sp, (X, Y) -> (X .+= 10; Y .+= 100; nothing), Dagger.TileRW(1), Dagger.TileRW(2))
+        Dagger.tile_restore!(sp)
+        me == 0 && @test all(==(11.0), A1)
+        me == np - 1 && @test all(==(102.0), A2)       # the result went back to where tile 2 came from
+    end
+    @testset "a small array every rank has its own copy of (replicated tile) is the same everywhere afterwards" begin
+        info = zeros(Int, 1)
+        sp = Dagger.TileSpace(1, id -> 0, id -> (1,), id -> info; types = id -> Int,
+                              initial = id -> (UInt64(1) << np) - 1, homes = id -> (UInt64(1) << np) - 1)
+        Dagger.tile_spawn!(sp, a -> (a[1] = 7; nothing), Dagger.TileRW(1); at = np - 1)      # written on one rank only
+        Dagger.tile_restore!(sp)
+        @test info[1] == 7                                                                      # every rank sees it
+    end
     @testset "element types: Float32 and ComplexF64 tiles" begin
         for T in (Float32, ComplexF64)
             sp = Dagger.TileSpace(2, id -> id == 1 ? 0 : np - 1, id -> (3, 3), id -> fill(T(id), 3, 3); T)
