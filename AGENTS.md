@@ -1747,3 +1747,29 @@ lesson.
    object up in an `IdDict` and classifying it once halved it (19.8 -> 9.0 ms), and
    on Fulda the unchanged library Cholesky went from 1.06 to 0.76 s. Put phase timers
    into every new stage (`HIER_TIMING`) before optimising.
+
+145. **A bypass of the planner changes what a task's result *is*, not only how it
+   runs, and a suite with the switch on finds what a suite with it off cannot.**
+   The first full MPI suites with `JULIA_DAGGER_TILEFLOW_REGIONS=1` (4x2, 2x4, two
+   nodes) failed in dozens of places while every test of the layer itself was
+   green, because the layer had only been run on tests that were written for it.
+   Four separate causes: (a) a plain `Array` argument was a replica on every rank
+   and was written back everywhere, but `spawn_datadeps` has one owner (rank 0 of
+   the region's communicator) and the others keep their copy, which a group test
+   pins (`groups.jl:126`: 5.0 where 1.0); (b) the tasks that make the blocks of a
+   `DArray` and the copies of DArray operations each run in a small region, and a
+   lowered task returns `TileRemoteResult` / a plain value instead of a `Chunk`
+   with a location, so `fetch(...; raw=true).handle` and later `adjoint(chunk)` got
+   the wrong thing; the rule that holds is that only in-place (`!`) functions with
+   a declared `In/Out/InOut` dependency are lowered; (c) `_chol!` read `info` from
+   the local copy and every rank but the owner reported 0 (BUGS B27): agree on it
+   with the cooperative allreduce instead of making the bridge copy back
+   everywhere; (d) tests that measure the planner's own decisions (`avoid_driver`,
+   `Copy planning`) cannot tell anything with the planner bypassed: run them with
+   `with_planner` (test/util.jl). Reproduce a suite failure with the smallest
+   driver that includes just that file with the same preamble (4 ranks, 2 threads
+   locally) and compare switch off/on, then run the whole file set locally once
+   (2 ranks x 4 threads, ~25 min) before spending cluster hours; assert a counter
+   (`TILEFLOW_REGION_RUNS`) so a fallback cannot pass for the layer working. And a
+   communicator or an owner must come from the region's context, never from the
+   world: a group (and later a changing set of ranks) has neither.
