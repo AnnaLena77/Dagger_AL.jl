@@ -57,6 +57,11 @@ struct DataMissing
     owner::Int
 end
 
+"A published *failure*: the task that was to produce this version failed. Readers get the exception instead of waiting for ever (an exception on a detached task is a hang)."
+struct TileFailure
+    ex::Any
+end
+
 "A pull future for a tile's value: `wait` / `fetch` give it, or throw why it could not be fetched."
 mutable struct DataSlot
     const ev::Base.Event
@@ -70,7 +75,9 @@ function Base.fetch(s::DataSlot)
     wait(s)
     e = @atomic :acquire s.err
     e === nothing || throw(e)
-    return @atomic :acquire s.value
+    v = @atomic :acquire s.value
+    v isa TileFailure && throw(v.ex)
+    return v
 end
 _fill!(s::DataSlot, v) = (@atomic :release s.value = v; notify(s.ev); nothing)
 _fail!(s::DataSlot, e::Exception) = (@atomic :release s.err = e; notify(s.ev); nothing)
@@ -249,3 +256,7 @@ function dir_handle!(d::TileDirectory, msg::DataMoveAck)
     end
     return nothing
 end
+
+"Publish that producing version `version` of the tile `name` failed with `ex`: every reader of that version gets the exception."
+tile_publish_failure!(d::TileDirectory, name::TileName, version::Integer, ex) =
+    tile_publish!(d, name, version, TileFailure(ex isa Exception ? ex : ErrorException(string(ex))); readers=-1)

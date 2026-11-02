@@ -49,4 +49,20 @@ end
         ids = [0, 1, 2]
         @test all(chol_case(ids, 5, 32, (i, j) -> 1))
     end
+
+    @testset "a failing kernel fails every rank instead of hanging them" begin
+        ids = [0, 1, 2, 3]
+        net, ds, tasks = dir_cluster(ids, ids)
+        nt, nb = 5, 16
+        Random.seed!(2)
+        X = rand(nt * nb, nt * nb); A = X + X'                             # symmetric but not positive definite
+        owner(i, j) = ids[mod(i - 1, 2) * 2 + mod(j - 1, 2) + 1]
+        tile(i, j) = copy(A[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb])
+        runs = map(ids) do r; Threads.@spawn tile_cholesky!(ds[r], nt, tile, owner); end
+        @test timedwait(() -> all(istaskdone, runs), 90.0; pollint=0.05) === :ok       # nobody waits for a tile that will never come
+        errs = [try; fetch(t); nothing; catch e; e; end for t in runs if istaskdone(t)]
+        @test length(errs) == 4 && all(e -> e !== nothing, errs)
+        @test any(e -> occursin("PosDefException", sprint(showerror, e)), errs)         # and the cause is named
+        dir_close(net, tasks)
+    end
 end

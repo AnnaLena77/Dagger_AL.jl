@@ -21,4 +21,14 @@
     @test norm(L * L' - A) / norm(A) < 1e-12
     @test norm(L - cholesky(Symmetric(A, :L)).L) / norm(L) < 1e-10
     @test isempty(d.errors)
+
+    # a matrix that is not positive definite: every rank gets an error (named), nobody waits for a tile that will never be published
+    Y = rand(n, n); B = Y + Y'
+    tileb(i, j) = copy(B[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb])
+    run = Threads.@spawn Dagger.tile_cholesky!(d, nt, tileb, owner; space=UInt64(78))
+    @test timedwait(() -> istaskdone(run), 120.0; pollint=0.01) === :ok
+    err = try; fetch(run); nothing; catch e; e; end
+    @test err !== nothing
+    Dagger.barrier(; comm)
+    @test isempty(d.errors)
 end

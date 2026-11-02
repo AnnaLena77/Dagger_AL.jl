@@ -34,12 +34,19 @@ function tile_cholesky!(d::TileDirectory, nt::Int, init, owner; space::UInt64=UI
     chains = Pair{Tuple{Int,Int},Task}[]
     for j in 1:nt, i in j:nt
         owner(i, j) == me || continue
-        cur = Threads.@spawn init(i, j)
+        published = Threads.Atomic{Bool}(false)             # has the final version (or its failure) been published?
+        guard(f) = try f() catch e
+            if !Threads.atomic_xchg!(published, true)           # a failed task must not leave the ranks that wait for this tile waiting for ever
+                tile_publish_failure!(d, name(i, j), j, CapturedException(e, catch_backtrace()))
+            end
+            rethrow()
+        end
+        cur = Threads.@spawn guard(() -> init(i, j))
         # N.B. each task gets its predecessor through a `let`: a captured variable that the loop reassigns would make the task wait for itself
         for k in 1:j-1
             if i == j
                 cur = let prev = cur, sa = early(j, k)
-                    Threads.@spawn begin
+                    Threads.@spawn guard() do
                         C = fetch(prev); A = fetch(late(sa, j, k))
                         BLAS.syrk!('L', 'N', -1.0, A, 1.0, C)
                         C
@@ -47,7 +54,7 @@ function tile_cholesky!(d::TileDirectory, nt::Int, init, owner; space::UInt64=UI
                 end
             else
                 cur = let prev = cur, sa = early(i, k), sb = early(j, k)
-                    Threads.@spawn begin
+                    Threads.@spawn guard() do
                         C = fetch(prev); A = fetch(late(sa, i, k)); B = fetch(late(sb, j, k))
                         BLAS.gemm!('N', 'T', -1.0, A, B, 1.0, C)
                         C
@@ -57,19 +64,21 @@ function tile_cholesky!(d::TileDirectory, nt::Int, init, owner; space::UInt64=UI
         end
         if i == j
             cur = let prev = cur
-                Threads.@spawn begin
+                Threads.@spawn guard() do
                     C = fetch(prev)
                     _, info = LAPACK.potrf!('L', C)
                     info == 0 || throw(LinearAlgebra.PosDefException(Int(info)))
+                    Threads.atomic_xchg!(published, true)
                     tile_publish!(d, name(i, j), j, C; readers=-1)     # the final version: published, last
                     C
                 end
             end
         else
             cur = let prev = cur, sl = early(j, j)
-                Threads.@spawn begin
+                Threads.@spawn guard() do
                     C = fetch(prev); L = fetch(late(sl, j, j))
                     BLAS.trsm!('R', 'L', 'T', 'N', 1.0, L, C)
+                    Threads.atomic_xchg!(published, true)
                     tile_publish!(d, name(i, j), j, C; readers=-1)
                     C
                 end
