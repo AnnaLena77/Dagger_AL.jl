@@ -231,8 +231,9 @@ function tileflow_region!(queue)::Bool
     t1 = timing ? time_ns() : UInt64(0)
     tiles = plan.tiles; me = tile_rank(tr)
     _exchange_dims!(tr, tiles) || return false
-    allmask = np == 64 ? typemax(UInt64) : (UInt64(1) << np) - 1
-    mask(id) = tiles[id].kind === :array ? allmask : UInt64(1) << tiles[id].owner
+    # A plain array belongs to rank 0 of the region's communicator, as in `spawn_datadeps`: the others read it from there, only the owner gets the
+    # result written back (they keep their own copy; a group's region must not change the arrays of the members that are not its owner).
+    mask(id) = UInt64(1) << tiles[id].owner
     sp = TileSpace(length(tiles), id -> tiles[id].owner, id -> tiles[id].dims,
                    id -> (t = tiles[id]; t.kind === :chunk ? tile_chunk_array(t.obj) : t.obj);
                    types = id -> tiles[id].T, initial = mask, homes = mask, transport = tr)
