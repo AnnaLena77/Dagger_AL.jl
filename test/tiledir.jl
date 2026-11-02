@@ -151,4 +151,55 @@ include("tiledir_defs.jl")
         @test all(d -> isempty(d.errors), values(ds))
         dir_close(net, tasks)
     end
+
+    @testset "ranks change to the new set one after the other (epochs)" begin
+        # a rank leaves: the others learn of it at different times
+        ids = [0, 1, 2, 3]; rest = [0, 1, 3]
+        net, ds, tasks = dir_cluster(ids, ids)
+        names = [TileName(12, i) for i in 1:200]
+        for n in names; announce!(ds, n, 0, 1); end
+        n = first(m for m in names if tile_home(m, ids) == 2 && tile_home(m, rest) == 3)
+        for r in (0, 1); dir_set_ranks!(ds[r], rest); end                  # 0 and 1 are in epoch 1; 2 and 3 are still in epoch 0
+        empty!(ds[0].cache)
+        f = dir_future(ds[0], n; minversion=1)                              # goes to rank 3, the new home, which does not know the new set yet
+        sleep(0.1)
+        @test !isready(f)
+        @test lock(() -> length(ds[3].held), ds[3].lock) >= 1               # held at rank 3, not passed on to rank 2
+        s0 = total_sent(ds); sleep(0.2)
+        @test total_sent(ds) == s0                                          # and nothing bounces between 2 and 3
+        dir_set_ranks!(ds[3], rest)
+        sleep(0.05)
+        @test !isready(f)                                                    # rank 3 is the home now, but the entry is still at rank 2
+        dir_set_ranks!(ds[2], rest)                                          # rank 2 changes last and hands its entries over
+        @test await(f) == DirEntry(0, 1)
+        ok = timedwait(() -> all(m -> homes_of(ds, m) == [tile_home(m, rest)], names), 20.0; pollint=0.005)
+        @test ok === :ok
+        @test all(d -> isempty(d.held) && isempty(d.errors) && d.epoch == 1, values(ds))
+        dir_close(net, tasks)
+        # a rank joins: the new rank and one old rank are ahead of the others
+        old = [0, 1, 2, 3]; new = [0, 1, 2, 3, 4]
+        net, ds, tasks = dir_cluster(new, old)
+        for m in names; announce!(ds, m, 1, 1); end
+        n2 = first(m for m in names if tile_home(m, old) in (0, 2, 3) && tile_home(m, new) == 4)      # its old home changes late
+        ds[4] = TileDirectory(4, old, net); tasks[4] = dir_serve!(ds[4], net)
+        for r in (4, 1); dir_set_ranks!(ds[r], new); end
+        empty!(ds[1].cache)
+        g = dir_future(ds[1], n2; minversion=1)                              # to rank 4; the entry is still at its old home
+        sleep(0.1)
+        @test !isready(g)
+        for r in (0, 2, 3); dir_set_ranks!(ds[r], new); end                  # the old home hands it over
+        @test await(g) == DirEntry(1, 1)
+        @test timedwait(() -> all(m -> homes_of(ds, m) == [tile_home(m, new)], names), 20.0; pollint=0.005) === :ok
+        @test all(d -> isempty(d.held) && isempty(d.errors), values(ds))
+        dir_close(net, tasks)
+    end
+
+    @testset "an epoch only goes up" begin
+        net, ds, tasks = dir_cluster([0, 1], [0, 1])
+        dir_set_ranks!(ds[0], [0, 1]; epoch=5)
+        @test ds[0].epoch == 5
+        @test_throws ArgumentError dir_set_ranks!(ds[0], [0, 1]; epoch=5)
+        @test_throws ArgumentError dir_set_ranks!(ds[0], [0, 1]; epoch=3)
+        dir_close(net, tasks)
+    end
 end

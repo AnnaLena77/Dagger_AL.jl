@@ -21,12 +21,14 @@ end
 struct DirPut
     name::TileName
     entry::DirEntry
+    epoch::Int          # the sender's view of the set of ranks (see `dir_set_ranks!`)
 end
 struct DirGet
     name::TileName
     from::Int
     reqid::Int
     minversion::Int
+    epoch::Int
 end
 struct DirReply
     reqid::Int
@@ -60,6 +62,8 @@ mutable struct TileDirectory
     nextid::Int
     const sent::Threads.Atomic{Int}             # messages that went over the transport (a lookup at the home sends none)
     const errors::Vector{Any}                   # exceptions of the handler (a failing handler must not vanish silently)
+    epoch::Int                                  # the number of the current set of ranks; every change of the set is a new epoch
+    const held::Vector{Any}                     # messages from a newer epoch than this rank has reached: handled once it gets there
     const data::Dict{Tuple{TileName,Int},Any}   # the versions of tiles this rank owns and that readers may still fetch (src/tilestore.jl)
     const datapending::Dict{Int,Any}            # data requests this rank has sent and not had answered
     const moving::Dict{Tuple{TileName,Int},Tuple{Int,Vector{Any}}}   # versions on their way to another rank: (target, requests that arrived meanwhile)
@@ -68,7 +72,7 @@ mutable struct TileDirectory
     const dwait::Dict{Tuple{TileName,Int},Vector{Any}}   # data requests for a version that is not published yet (a reader that knows the owner asks it directly)
     TileDirectory(me::Integer, ranks, tr::DirTransport) =
         new(Int(me), sort!(collect(Int, ranks)), tr, ReentrantLock(), Dict{TileName,DirEntry}(), Dict{TileName,Vector{DirGet}}(),
-            Dict{Int,DirSlot}(), Dict{TileName,DirEntry}(), 0, Threads.Atomic{Int}(0), Any[],
+            Dict{Int,DirSlot}(), Dict{TileName,DirEntry}(), 0, Threads.Atomic{Int}(0), Any[], 0, Any[],
             Dict{Tuple{TileName,Int},Any}(), Dict{Int,Any}(),
             Dict{Tuple{TileName,Int},Tuple{Int,Vector{Any}}}(), Dict{Tuple{TileName,Int},Int}(),
             Dict{TileName,Int}(), Dict{Tuple{TileName,Int},Vector{Any}}())
@@ -91,9 +95,13 @@ end
 function dir_handle!(d::TileDirectory, msg::DirPut)
     out = Tuple{Int,Any}[]
     lock(d.lock) do
+        if msg.epoch > d.epoch                                   # the sender knows a newer set of ranks than this rank: wait until it has the same
+            push!(d.held, msg)
+            return
+        end
         h = _home(d, msg.name)
         if h != d.me
-            push!(out, (h, msg))                                 # not (or no longer) the home: pass it on
+            push!(out, (h, DirPut(msg.name, msg.entry, d.epoch)))   # not (or no longer) the home: pass it on, in this rank's epoch
             return
         end
         old = get(d.entries, msg.name, nothing)
@@ -118,9 +126,13 @@ end
 function dir_handle!(d::TileDirectory, msg::DirGet)
     out = Tuple{Int,Any}[]
     lock(d.lock) do
+        if msg.epoch > d.epoch
+            push!(d.held, msg)
+            return
+        end
         h = _home(d, msg.name)
         if h != d.me
-            push!(out, (h, msg))
+            push!(out, (h, DirGet(msg.name, msg.from, msg.reqid, msg.minversion, d.epoch)))
             return
         end
         e = get(d.entries, msg.name, nothing)
@@ -148,7 +160,8 @@ end
 
 "The owner announces tile `name` at `version` on rank `owner` (a new tile, a new version, or a move)."
 function dir_put!(d::TileDirectory, name::TileName, owner::Integer, version::Integer)
-    _dir_deliver!(d, lock(() -> _home(d, name), d.lock), DirPut(name, DirEntry(Int(owner), Int(version))))
+    home, ep = lock(() -> (_home(d, name), d.epoch), d.lock)
+    _dir_deliver!(d, home, DirPut(name, DirEntry(Int(owner), Int(version)), ep))
 end
 
 """
@@ -158,7 +171,7 @@ Ask for the entry of `name` once its version is at least `minversion`. Resolved 
 """
 function dir_future(d::TileDirectory, name::TileName; minversion::Integer=0)
     slot = DirSlot()
-    home = 0; reqid = 0
+    home = 0; reqid = 0; ep = 0
     hit = lock(d.lock) do
         c = get(d.cache, name, nothing)
         if c !== nothing && c.version >= minversion
@@ -166,7 +179,7 @@ function dir_future(d::TileDirectory, name::TileName; minversion::Integer=0)
         end
         d.nextid += 1; reqid = d.nextid
         d.pending[reqid] = slot
-        home = _home(d, name)
+        home = _home(d, name); ep = d.epoch
         return nothing
     end
     if hit !== nothing
@@ -174,33 +187,44 @@ function dir_future(d::TileDirectory, name::TileName; minversion::Integer=0)
         notify(slot.ev)
         return slot
     end
-    _dir_deliver!(d, home, DirGet(name, d.me, reqid, Int(minversion)))
+    _dir_deliver!(d, home, DirGet(name, d.me, reqid, Int(minversion), ep))
     return slot
 end
 
 """
-    dir_set_ranks!(d, ranks)
+    dir_set_ranks!(d, ranks; epoch=d.epoch + 1)
 
-Change the set of ranks (identifiers). Every rank calls it with the same set at a point where no directory message is in flight. The entries and the waiting
-requests whose home is now another rank are handed to it.
+Change the set of ranks (identifiers) to `ranks`, as epoch `epoch`. Each rank calls it when it learns of the new set; the ranks need not do so at the same time.
+The entries and waiting requests whose home is now another rank are handed to it, in the new epoch. A message from a newer epoch that reaches a rank which has not
+changed yet waits there (`held`) and is handled when it has, so two ranks with different views never pass a message back and forth. A rank that leaves must keep
+running until the others have changed too.
 """
-function dir_set_ranks!(d::TileDirectory, ranks)
+function dir_set_ranks!(d::TileDirectory, ranks; epoch::Integer=d.epoch + 1)
     out = Tuple{Int,Any}[]
+    ready = Any[]
     lock(d.lock) do
+        epoch > d.epoch || throw(ArgumentError("a new set of ranks needs a higher epoch than $(d.epoch)"))
         d.ranks = sort!(collect(Int, ranks))
+        d.epoch = Int(epoch)
         for (name, e) in collect(d.entries)
             h = _home(d, name)
             h == d.me && continue
-            push!(out, (h, DirPut(name, e))); delete!(d.entries, name)
+            push!(out, (h, DirPut(name, e, d.epoch))); delete!(d.entries, name)
         end
         for (name, ws) in collect(d.waiters)
             h = _home(d, name)
             h == d.me && continue
-            for w in ws; push!(out, (h, w)); end
+            for w in ws; push!(out, (h, DirGet(w.name, w.from, w.reqid, w.minversion, d.epoch))); end
             delete!(d.waiters, name)
         end
+        keep = Any[]
+        for m in d.held
+            if m.epoch <= d.epoch; push!(ready, m); else push!(keep, m); end
+        end
+        empty!(d.held); append!(d.held, keep)
     end
     for (to, m) in out; _dir_deliver!(d, to, m); end
+    for m in ready; dir_handle!(d, m); end                 # messages that were waiting for this epoch
     return nothing
 end
 
