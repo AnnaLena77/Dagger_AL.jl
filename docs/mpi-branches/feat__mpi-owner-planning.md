@@ -72,3 +72,25 @@ Distributed (1 process x 64 threads) 0.90 s; Dagger MPI 1.48 s; TileFlow prototy
 ### Phase 4 is bound by task *launch*, not by planning (job 9804, Fulda, Cholesky 8192/256, 5984-task regions, `HIER_TIMING`)
 
 1 x 64: `distribute_task!` on the planning task 430-477 ms (about 80 us/task: populate 22, syncdeps 20, spec+enqueue 10, track 9, copy-to 9, scope 5, schedule 3, history 2), then the final `maybe_flush_batch!` takes 251-437 ms and `close_submitter!` 3-8 ms; phase 4 in total 850-1045 ms. The planner produces tasks at ~80 us each, the single submitter launches them at ~140 us each, and the backlog is drained in the last flush. 2 x 32: flush 1-4 ms (the submitter keeps up), but copy-to costs 27 us/task (497 data moves). Next: break `eager_launch!` down under MPI (the local fast path of lesson 103 requires `DistributedAcceleration`, so MPI tasks take the general placement path), then consider several submitters, then the tile path.
+
+## Measurements of 2026-11-01/02 and the decision for the build (Fulda, Cholesky 8192/256, one node unless stated)
+
+**What is in the tree** (all opt-in, Datadeps untouched): `Dagger.TileSpace`/`tile_spawn!` (`src/tileflow.jl`, MPI transport in `ext/MPIExt.jl`), the `@light` tasks it runs on (`src/microtask.jl`), and `LinearAlgebra._chol!` of a dense square-tiled `DArray` routed to it with `JULIA_DAGGER_TILEFLOW=1` (`src/array/tileflow.jl`, fallback to Datadeps for anything else).
+
+| layout | Datadeps (real `_chol!`) | TileFlow layer (real `_chol!`) | speed-up |
+|---|---|---|---|
+| 1 x 64 | 1.53 s | 0.64 s | 2.4x |
+| 1 x 2 x 32 | 1.62 s | 0.74 s | 2.2x |
+| 1 x 4 x 16 | 2.02 s | 0.93 s | 2.2x |
+| 2 nodes x 64 | 1.34 s | 0.48 s | 2.8x |
+
+**Where the time goes** (`LLM_info/bench/tileflow/thread_probe.jl`, warm runs): 1 x 64 0.59 s against a floor of 0.50 s (kernel seconds / threads; the kernels run ~1.5x slower under 64-way FPU sharing), workers 84-85 % busy, the first (driver) thread is an extra interactive thread and does no kernel work. 2 x 32: 0.72-0.76 s against 0.48 s (63-69 % busy); 4 x 16: 0.88-1.03 s against 0.41-0.45 s (40-51 % busy). The loss grows with the number of ranks: it is communication that waits behind kernels, which never yield.
+
+**Communication on the idle first thread** (`JULIA_DAGGER_TILE_COMM_POOL=interactive`, default): -17 % at 2 x 32, -14 % at 4 x 16, -13 % on two nodes, -1 % at 1 x 64.
+
+**Owner-only generation** (`LLM_info/bench/tileflow/owner_chol.jl`, HPX-style: each rank creates only the tasks of the tiles it owns, dependencies from a closed-form rule, results pushed to computed consumers, tag = tile id, no shared table, no walk of foreign tasks): 0.58 / 0.73 / 0.87 s at 1 x 64 / 2 x 32 / 4 x 16 against 0.62 / 0.79 / 0.90 s for the replicated walk; creation time falls with the rank count (22 -> 14 -> 6 ms). Correct to 4.5e-18 on 1, 2, 4 ranks.
+
+**Decision.** Both stay, with different jobs:
+1. *Bridge (SPMD front end, existing programs):* a `spawn_datadeps` region whose tasks use only whole dense tiles (plus plain constants) is executed on the tile layer automatically; anything else falls back to the unchanged planner. This is what speeds up code nobody rewrites.
+2. *Owner-only generation (the HPX-style direction):* the layer's primitives (light tasks, posted receives, push to consumers, tag = tile id) already do not need the replicated table; the next real step is a front end in which a rank enumerates only its own tasks from a rule, and later tasks created inside tasks. It is the basis for ranks that join or leave, because nothing global has to be agreed on.
+The honest limit: owner-only needs the dependency rule in closed form (true for the dense factorizations), a recorded region does not.
