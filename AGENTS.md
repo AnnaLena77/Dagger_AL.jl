@@ -1773,3 +1773,44 @@ lesson.
    (`TILEFLOW_REGION_RUNS`) so a fallback cannot pass for the layer working. And a
    communicator or an owner must come from the region's context, never from the
    world: a group (and later a changing set of ranks) has neither.
+
+146. **A service loop must never wait for a payload, and a benchmark fixture must not
+   sit inside the timed region.** The tile directory's service task receives the
+   messages of every pull on one thread. Its first version serialized each 512 KB
+   tile and, in a second try, sent the bytes with a header and then *waited* for the
+   payload; both measured no better, the second was worse with many pulls in flight
+   (1.4 -> 2.1 ms per tile) because nothing else was handled meanwhile. What works:
+   the header makes the receiver allocate the array and post an `Irecv!` into it,
+   and the loop delivers the value when the request has completed (1.4 -> 0.96 ms,
+   raw MPI 0.81). Two hypotheses were refuted by measuring first (serialization
+   cost; the idle `sleep` of the loop) -- time the phases (lookup alone, lookup plus
+   data, plain MPI with the same message pattern) before rewriting a path. The same
+   investigation found that the HPX-style Cholesky benchmark built its tiles
+   (random numbers, symmetrizing, temporaries) *inside* the timed region and on one
+   thread (lesson 139: one NUMA domain); the hook's fixture is built outside. Build
+   the working tiles before the timer, from many threads, and compare in one
+   allocation.
+
+147. **A request protocol with a changing set of ranks needs an epoch on the
+   messages.** If ranks learn of a new rank set at different times, two ranks with
+   different views of who is the home of a name pass a message back and forth for
+   ever (rank 2 leaves, its names go to rank 3: a rank already in the new set sends
+   to 3, rank 3 still believes 2 is the home and forwards, rank 2 forwards back).
+   Every message carries the sender's epoch, a rank that receives a newer one than
+   its own keeps it until it has changed too, and a forwarded message carries the
+   forwarder's epoch. Test with the ranks changing one after the other and assert
+   that the message count stays flat while the request is held. In the same vein:
+   a task that fails must publish the failure as its result (`TileFailure`), or the
+   ranks that wait for it wait for ever; and a closure that captures a variable the
+   loop reassigns (`prev = cur` ... `cur = @spawn fetch(prev)`) makes the task wait
+   for itself ("cannot wait on current task") -- bind it with `let`.
+
+148. **A test of a counter that proves a path ran must know when the path legitimately
+   falls back.** The region bridge handles the tiles of one process; the Distributed
+   suite adds workers (`-p 3`), so a `distribute`d block may sit on another process
+   and the region falls back, depending on where the arrays happened to be placed:
+   `runs >= 1` failed one run in a few. Assert the counter only when
+   `length(procs()) == 1` and keep the numerical checks everywhere. Also: the
+   Distributed suite aborts at the first failing group, so a "13 minute" run was an
+   aborted one -- compare per-group times of runs that finished the same groups,
+   and read the summary columns (`Pass Broken Total` is not `Pass Fail Total`).
