@@ -1,4 +1,12 @@
 LinearAlgebra.cholcopy(A::DArray{T,2}) where T = copy(A)
+# Under MPI only the rank that owns `info` is told what a failing `potrf` wrote into it (the arguments of a Datadeps region are copied back to the
+# owner alone, BUGS B27): every other rank would report 0 for a matrix that is not positive definite. The ranks agree on the largest value.
+function agree_info(info::Integer)
+    tr = tile_transport(current_acceleration())
+    tile_nranks(tr) == 1 && return info
+    return convert(typeof(info), tile_allreduce_max(tr, Int(info)))
+end
+
 function potrf_checked!(uplo, A, info_arr)
     result = move(task_processor(), LAPACK.potrf!)(uplo, A)
     # Most LAPACK backends (OpenBLAS, CUBLAS, rocBLAS, ...) return an
@@ -60,7 +68,7 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{UpperTriangular}) where T
         err isa PosDefException || rethrow()
     end
 
-    return UpperTriangular(A), info[1]
+    return UpperTriangular(A), agree_info(info[1])
 end
 function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{LowerTriangular}) where T
     LinearAlgebra.checksquare(A)
@@ -106,5 +114,5 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{LowerTriangular}) where T
         err isa PosDefException || rethrow()
     end
 
-    return LowerTriangular(A), info[1]
+    return LowerTriangular(A), agree_info(info[1])
 end
