@@ -125,3 +125,16 @@ using Dagger, Test, Random
         @test fetch(acc) == sum(1:20)
     end
 end
+
+@testset "Light tasks: a continuation calls functions defined after its predecessor started" begin
+    # A task released by another light task is spawned from that task and inherits its world age; a function defined (eval'd) after the predecessor
+    # started would be "too new" for it without `invokelatest`. Seen once in a full Distributed run (microtask.jl 'LightAfter' test).
+    gate = Base.Event()
+    pred = Dagger.light_spawn(() -> (wait(gate); nothing))
+    f = Core.eval(Main, :(world_age_probe_fn(x, y) = (x, y)))        # a new method, defined after `pred` started running
+    l = Dagger.light_spawn(f, 1, Dagger.LightAfter(pred))
+    l2 = Dagger.light_spawn(f, 2, pred)
+    notify(gate)
+    @test fetch(l) == (1, nothing)
+    @test fetch(l2) == (2, nothing)
+end

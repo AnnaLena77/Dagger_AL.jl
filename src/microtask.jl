@@ -80,7 +80,9 @@ function _light_run!(t::LightTask)
     end
     if !failed
         res = try
-            t.f(map(_light_resolve, args)...)
+            # `invokelatest`: this task was spawned by the task that finished its last predecessor and has that task's world age, so a function
+            # defined after that task started would be too new to call (seen in a full Distributed run). `t.f` is not inferred anyway.
+            Base.invokelatest(t.f, map(_light_resolve, args)...)
         catch e
             LightFailed(CapturedException(e, catch_backtrace()))
         end
