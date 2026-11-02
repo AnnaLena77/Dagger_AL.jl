@@ -71,6 +71,17 @@ struct TileFailure
     ex::Any
 end
 
+# Optional tracing of the hops of a pull (benchmarks): install a vector and every call records (code, request id, time_ns). One process or one node (one clock) only.
+const TILE_TRACE = Ref{Union{Nothing,Vector{Tuple{Int,Int,UInt64}}}}(nothing)
+const TILE_TRACE_LOCK = ReentrantLock()
+@inline function tile_trace!(code::Int, id::Int)
+    t = TILE_TRACE[]
+    t === nothing && return nothing
+    tt = time_ns()
+    lock(() -> push!(t, (code, id, tt)), TILE_TRACE_LOCK)
+    return nothing
+end
+
 "A pull future for a tile's value: `wait` / `fetch` give it, or throw why it could not be fetched."
 mutable struct DataSlot
     const ev::Base.Event
@@ -157,6 +168,7 @@ function tile_fetch(d::TileDirectory, name::TileName, version::Integer; owner::U
             d.datapending[d.nextid] = slot
             d.nextid
         end
+        tile_trace!(1, reqid)                                              # the request leaves the reader
         _dir_deliver!(d, Int(owner), DataGet(name, Int(version), d.me, reqid))
         return slot
     end
@@ -183,6 +195,7 @@ function _tile_fetch_continue(d::TileDirectory, name::TileName, version::Int, es
 end
 
 function dir_handle!(d::TileDirectory, msg::DataGet)
+    tile_trace!(2, msg.reqid)                                              # the request is handled at the owner
     key = (msg.name, msg.version)
     reply = lock(d.lock) do
         mv = get(d.moving, key, nothing)
@@ -199,13 +212,16 @@ function dir_handle!(d::TileDirectory, msg::DataGet)
         end
         tv === nothing ? DataMissing(msg.reqid, msg.name, msg.version, d.me) : DataReply(msg.reqid, msg.name, msg.version, tv.value)
     end
+    tile_trace!(3, msg.reqid)                                              # the reply is handed to the transport
     reply === nothing || _dir_deliver!(d, msg.from, reply)
     return nothing
 end
 
 function dir_handle!(d::TileDirectory, msg::DataReply)
+    tile_trace!(5, msg.reqid)                                              # the reply (with its payload) is at the reader
     slot = lock(() -> pop!(d.datapending, msg.reqid, nothing), d.lock)
     slot === nothing || _fill!(slot, msg.value)
+    tile_trace!(6, msg.reqid)
     return nothing
 end
 

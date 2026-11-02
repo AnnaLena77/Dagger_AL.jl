@@ -4148,6 +4148,7 @@ function dir_service_loop(s::MPIDirService)
             while !MPI.Test(req); yield(); end                     # already matched: completes at once
             m = Serialization.deserialize(IOBuffer(buf))
             if m isa Dagger.DataReplyBulk
+                Dagger.tile_trace!(4, m.reqid)                       # the header of the reply is at the reader
                 arr = Array{m.T}(undef, m.dims)
                 push!(s.bulk, (MPI.Irecv!(arr, comm; source=MPI.Get_source(stat), tag=DIR_BULK_TAG), Dagger.DataReply(m.reqid, m.name, m.version, arr)))
             else
