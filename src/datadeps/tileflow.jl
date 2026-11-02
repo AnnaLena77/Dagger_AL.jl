@@ -118,6 +118,23 @@ end
     return (v, false)
 end
 
+# Only in-place functions (`gemm!`, `potrf_checked!`, `copyto!`, ...) are lowered: what they do is the effect on their arguments, and their result is read, if at
+# all, with `fetch`. Any other task may produce a block or a value that the rest of Dagger passes around as an ordinary `Chunk` with a location (the copies
+# a DArray operation makes, `adjoint(chunk)`, ...), which a lowered task does not give: it would hand `TileRemoteResult` to the next task.
+const REGION_INPLACE = Dict{DataType,Bool}()
+const REGION_INPLACE_LOCK = ReentrantLock()
+function _region_inplace(fn)::Bool
+    fn isa Type && return false
+    T = typeof(fn)
+    return @lock REGION_INPLACE_LOCK get!(REGION_INPLACE, T) do
+        try
+            endswith(string(nameof(fn)), "!")
+        catch
+            false
+        end
+    end
+end
+
 function _region_plan(queue, tr, np::Int, accel)
     pairs = queue.seen_tasks
     memo = IdDict{DTask,Any}()
@@ -146,6 +163,7 @@ function _region_plan(queue, tr, np::Int, accel)
         a1 = first(fa)
         (ispositional(a1) && a1.pos.idx == 0) || return _region_no("unexpected function position")
         fn = value(a1)
+        _region_inplace(fn) || return _region_no("task function $(fn) is not an in-place (!) function: its result may be used as a block or a value")
         template = Any[]; kwargs = Pair{Symbol,Any}[]; slots = Tuple{Int,Bool}[]
         last = 0                              # positions need only ascend (a typed spec starts at 2, an untyped one at 1)
         hasdep = false                        # a task declares a dependency (In/Out/InOut/Deps) on a tile, or it is not about data flow at all

@@ -2,6 +2,11 @@
 # Datadeps path, and the counter proves the layer really ran (the fallback gives the same numbers).
 using Dagger, LinearAlgebra, Random, Test
 
+# Only in-place (`!`) functions are lowered (`Dagger._region_inplace`): any other task may produce a block or value that the rest of Dagger needs as a Chunk.
+tf_sum!(x) = sum(x)
+tf_boom!(x) = error("boom")
+tf_noop!(x, y) = nothing
+
 function tf_region_compare(f)
     old = Dagger.TILEFLOW_REGIONS[]
     try
@@ -93,7 +98,7 @@ end
             n0 = Dagger.TILEFLOW_REGION_RUNS[]
             t = nothing
             Dagger.spawn_datadeps() do
-                t = Dagger.@spawn sum(Dagger.In(Ac[1, 1]))
+                t = Dagger.@spawn tf_sum!(Dagger.In(Ac[1, 1]))
             end
             @test Dagger.TILEFLOW_REGION_RUNS[] == n0 + 1
             @test fetch(t) == 2.0 * 16 * 16                                     # fetch gives the value
@@ -101,15 +106,24 @@ end
             @test fetch(Dagger.@spawn (x -> x + 1)(t)) == 2.0 * 16 * 16 + 1
             # a failing task raises DTaskFailedException from the region
             @test_throws Dagger.DTaskFailedException Dagger.spawn_datadeps() do
-                Dagger.@spawn error("boom", Dagger.InOut(Ac[1, 1]))
+                Dagger.@spawn tf_boom!(Dagger.InOut(Ac[1, 1]))
             end
             # an unsupported argument (a Ref) sends the whole region to the ordinary planner
             n1 = Dagger.TILEFLOW_REGION_RUNS[]
             r = Ref(0)
             Dagger.spawn_datadeps() do
-                Dagger.@spawn ((x, y) -> nothing)(Dagger.In(Ac[1, 1]), r)
+                Dagger.@spawn tf_noop!(Dagger.In(Ac[1, 1]), r)
             end
             @test Dagger.TILEFLOW_REGION_RUNS[] == n1
+            # a task that is not an in-place function may produce a block or a value for others: it is never lowered, and its result stays an ordinary Chunk
+            n2 = Dagger.TILEFLOW_REGION_RUNS[]
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn sum(Dagger.In(Ac[1, 1]))
+            end
+            @test Dagger.TILEFLOW_REGION_RUNS[] == n2
+            E = distribute(fill(1.0, 32, 32), Blocks(16, 16))
+            @test Dagger.TILEFLOW_REGION_RUNS[] == n2
+            @test all(c -> fetch(c; raw=true) isa Dagger.Chunk, E.chunks)
         finally
             Dagger.tileflow_regions!(old)
         end

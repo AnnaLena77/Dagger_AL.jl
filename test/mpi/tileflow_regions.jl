@@ -1,5 +1,8 @@
 # spawn_datadeps regions on the TileFlow layer over MPI (included by cpu.jl, which has set up MPI acceleration and `comm`): unchanged library code,
 # results equal the Datadeps path, the region counter proves the layer ran, failures are agreed on every rank, and the contract holds.
+# Only in-place (`!`) functions are lowered (`Dagger._region_inplace`)
+mpi_region_sum!(x) = sum(x)
+
 @testset "TileFlow regions (MPI)" begin
     old = Dagger.TILEFLOW_REGIONS[]
     me = MPI.Comm_rank(comm)
@@ -54,7 +57,7 @@
         n0 = Dagger.TILEFLOW_REGION_RUNS[]
         Dagger.spawn_datadeps() do
             for j in 1:3, i in 1:3
-                push!(ts, Dagger.@spawn sum(Dagger.In(Ac[i, j])))
+                push!(ts, Dagger.@spawn mpi_region_sum!(Dagger.In(Ac[i, j])))
             end
         end
         @test Dagger.TILEFLOW_REGION_RUNS[] == n0 + 1
