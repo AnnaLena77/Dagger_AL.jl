@@ -251,6 +251,38 @@ function tile_allgather_ints(tr::TileTransport, v::Vector{Int})
     return out
 end
 
+const TILE_COLL_SEQ = Threads.Atomic{Int}(0)     # numbers the collectives below; every rank calls them in the same order
+
+"""
+    tile_bcast_value(tr, root, value) -> value
+
+Collective: rank `root` sends `value` (any serializable object) to all ranks, which all return it. Built on the send/receive primitives. This is what
+makes `fetch` of a task that ran on one rank give the same value everywhere.
+"""
+function tile_bcast_value(tr::TileTransport, root::Int, value)
+    np = tile_nranks(tr)
+    np == 1 && return value
+    me = tile_rank(tr)
+    tag = TAG_MOD + 3000 + 2 * (Threads.atomic_add!(TILE_COLL_SEQ, 1) % 1000)
+    if me == root
+        io = IOBuffer(); Serialization.serialize(io, value); bytes = take!(io)
+        len = Int[length(bytes)]
+        evs = Base.Event[]
+        for r in 0:np-1
+            r == root && continue
+            push!(evs, tile_post_send(tr, len, r, tag)); push!(evs, tile_post_send(tr, bytes, r, tag + 1))
+        end
+        for ev in evs; wait(ev); end
+        return value
+    else
+        len = zeros(Int, 1)
+        wait(tile_post_recv(tr, len, root, tag))
+        bytes = Vector{UInt8}(undef, len[1])
+        wait(tile_post_recv(tr, bytes, root, tag + 1))
+        return Serialization.deserialize(IOBuffer(bytes))
+    end
+end
+
 "`tile_allreduce_max(tr, x::Int)`: the maximum of `x` over all ranks (cooperative; every rank must call it)."
 tile_allreduce_max(::LocalTileTransport, x::Int) = x
 """

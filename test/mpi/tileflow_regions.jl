@@ -46,6 +46,22 @@
         ref, got, runs = cmp(mm)
         @test runs >= 1
         @test norm(got - Am * Bm) / norm(Am * Bm) < 1e-12
+        # the value of a task of a lowered region is the same on EVERY rank (fetch is collective), and it can be passed on to a later task
+        Dagger.tileflow_regions!(true)
+        D2 = zeros(Blocks(16, 16), Float64, 48, 48); copyto!(D2, fill(2.0, 48, 48))
+        Ac = D2.chunks
+        ts = Any[]
+        n0 = Dagger.TILEFLOW_REGION_RUNS[]
+        Dagger.spawn_datadeps() do
+            for j in 1:3, i in 1:3
+                push!(ts, Dagger.@spawn sum(Dagger.In(Ac[i, j])))
+            end
+        end
+        @test Dagger.TILEFLOW_REGION_RUNS[] == n0 + 1
+        vals = [fetch(t) for t in ts]
+        @test all(==(2.0 * 16 * 16), vals)                                  # the same value on every rank, whichever rank ran the task
+        @test fetch(Dagger.@spawn (x -> x + 1)(ts[end])) == 2.0 * 16 * 16 + 1
+        Dagger.tileflow_regions!(false)
         # a non-finite input fails with DTaskFailedException on every rank
         Anan = rand(48, 48) + 48I; Anan[3, 3] = NaN
         Dagger.tileflow_regions!(true)

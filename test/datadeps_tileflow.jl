@@ -68,7 +68,7 @@ end
             Dagger.tileflow_regions!(old)
         end
     end
-    @testset "task values, failures and the contract" begin
+    @testset "task values, use of results, failures, fallback" begin
         old = Dagger.TILEFLOW_REGIONS[]
         try
             Dagger.tileflow_regions!(true)
@@ -79,9 +79,9 @@ end
                 t = Dagger.@spawn sum(Dagger.In(Ac[1, 1]))
             end
             @test Dagger.TILEFLOW_REGION_RUNS[] == n0 + 1
-            @test fetch(t) == 2.0 * 16 * 16                                     # the value of a task is there (on its rank)
-            # a task of a lowered region cannot be an argument of another task
-            @test_throws ArgumentError Dagger.@spawn identity(t)
+            @test fetch(t) == 2.0 * 16 * 16                                     # fetch gives the value
+            # a task of a lowered region is an ordinary argument of a later task: its value is passed
+            @test fetch(Dagger.@spawn (x -> x + 1)(t)) == 2.0 * 16 * 16 + 1
             # a failing task raises DTaskFailedException from the region
             @test_throws Dagger.DTaskFailedException Dagger.spawn_datadeps() do
                 Dagger.@spawn error("boom", Dagger.InOut(Ac[1, 1]))

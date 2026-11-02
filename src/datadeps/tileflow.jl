@@ -8,8 +8,9 @@
 # Anything else (views and sub-ranges, scopes and other options, results of tasks, a task without a tile) sends the region to the unchanged planner.
 # The decision reads replicated metadata only, so every rank takes the same path.
 #
-# Contract of a lowered region: its tasks have no Thunk. A task's value is available on the rank that ran it (`fetch` on another rank raises), a task
-# cannot be an argument of a later task, a failing task raises `DTaskFailedException` from the region on every rank.
+# What changes for the user of a lowered region: nothing but speed. Its tasks have no Thunk (`DTask.stub` is a `TileStub`), so `fetch` is the collective it
+# is under MPI anyway - the rank that ran the task broadcasts the value - and a task used as an argument of a later task is replaced by that value.
+# A failing task raises `DTaskFailedException` from the region on every rank.
 
 const TILEFLOW_REGIONS = Ref(false)         # set from JULIA_DAGGER_TILEFLOW_REGIONS in __init__ (a precompiled const would bake in the build-time value)
 "How many regions ran on the TileFlow layer in this process (tests assert on it: the fallback gives the same numbers)."

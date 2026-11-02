@@ -95,7 +95,7 @@ end
 struct TileStub
     rank::Int
 end
-"What a rank that did not run a lowered task finds in its future."
+"What a rank that did not run a lowered task finds in its future (an internal marker: `fetch` replaces it by the value broadcast from the rank that ran the task)."
 struct TileRemoteResult
     rank::Int
 end
@@ -116,13 +116,11 @@ function Base.fetch(t::DTask; raw=false, move_value=!raw, unwrap=!raw, uniform=f
         throw(ConcurrencyViolationError("Cannot `fetch` an unlaunched `DTask`"))
     end
     if t.stub isa TileStub
-        # a task of a region that ran on the TileFlow layer: the value exists on one rank only
-        v = fetch(t.future; move_value=false, unwrap=false)
-        if v isa TileRemoteResult
-            move_value && throw(ArgumentError("the result of this task lives on rank $(v.rank): the region ran on the TileFlow layer, which keeps task results on the rank that ran the task (JULIA_DAGGER_TILEFLOW_REGIONS=0 uses the ordinary path)"))
-            return v
-        end
-        return move_value ? move(OSProc(), v) : v
+        # a task of a region that ran on the TileFlow layer: the value exists on the rank that ran it. Like every fetch under MPI this is collective:
+        # that rank sends the value to the others, so the result is the same everywhere. (The internal waits ask with move_value=false and do not.)
+        v = fetch(t.future; move_value=false, unwrap=false)          # raises if the task failed
+        move_value || return v
+        return tile_bcast_value(tile_transport(current_acceleration()), t.stub.rank, v isa TileRemoteResult ? nothing : v)
     end
     if t.owner >= 0
         # The owner learns of a failure from its own task, every other process from
