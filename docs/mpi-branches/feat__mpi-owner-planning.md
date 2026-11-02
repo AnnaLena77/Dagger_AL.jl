@@ -94,3 +94,20 @@ Distributed (1 process x 64 threads) 0.90 s; Dagger MPI 1.48 s; TileFlow prototy
 1. *Bridge (SPMD front end, existing programs):* a `spawn_datadeps` region whose tasks use only whole dense tiles (plus plain constants) is executed on the tile layer automatically; anything else falls back to the unchanged planner. This is what speeds up code nobody rewrites.
 2. *Owner-only generation (the HPX-style direction):* the layer's primitives (light tasks, posted receives, push to consumers, tag = tile id) already do not need the replicated table; the next real step is a front end in which a rank enumerates only its own tasks from a rule, and later tasks created inside tasks. It is the basis for ranks that join or leave, because nothing global has to be agreed on.
 The honest limit: owner-only needs the dependency rule in closed form (true for the dense factorizations), a recorded region does not.
+
+## Status 2026-11-02: regions on the tile layer (`JULIA_DAGGER_TILEFLOW_REGIONS=1`), the library code unchanged
+
+`spawn_datadeps` regions whose tasks use only default options, whole dense chunks (`In`/`Out`/`InOut` or bare), plain isbits arrays (`Out(info)`) and constants run on the tile layer (`src/datadeps/tileflow.jl`); everything else takes the unchanged planner. Failures raise `DTaskFailedException` on every rank, `fetch` of a task is collective (the rank that ran it broadcasts the value), a lowered task can be an argument of a later one. The decision uses replicated metadata and program order only.
+
+Cholesky 8192/256 of the unchanged `LinearAlgebra._chol!` (`mpi_chol.jl`), Fulda, median of 5, Datadeps against regions on (job 9834, same allocation):
+
+| layout | Datadeps | tile layer | speed-up |
+|---|---|---|---|
+| 1 x 64 | 1.47 s | 0.76 s | 1.9x |
+| 1 x 2 x 32 | 1.56 s | 0.86 s | 1.8x |
+| 1 x 4 x 16 | 1.75 s | 0.95 s | 1.8x |
+| 2 nodes x 64 | 1.43 s | 0.62 s | 2.3x |
+
+(The dedicated hook for `_chol!` reaches 0.64 / 0.74 / 0.93 / 0.48 s; the remaining gap is the region check and walk, see AGENTS.md lesson 144. Before the check was optimised the same rows were 1.06 / 1.19 / 1.32 / 0.88 s.) Suites with all switches off are unchanged: allocations 25/25 (task spawn 173 allocations), thunk 6150, scheduler 40281, datadeps 2156 passing.
+
+Open: LU/GEMM/QR timings through the region path (they are lowered, tested for equality and for the counter, not yet timed on Fulda); the full MPI suite and the Distributed suite with the switch on; owner-only generation (HPX style) as the next front end; GPU, sparse and multi-process Distributed tiles are not covered and fall back.

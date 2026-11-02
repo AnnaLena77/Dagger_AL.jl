@@ -1715,3 +1715,35 @@ lesson.
    measured 0.62 s on its own. Any opt-in path with a fallback needs a counter the
    tests assert on (`TILEFLOW_RUNS`), for the positive case and for the case that
    must fall back; and an A/B must print which path ran.
+
+142. **A decision every rank must take alike cannot look at whether something has
+   finished.** `tileflow_region!` first rejected an argument task that was not
+   `isready` at planning time. A `DArray`'s chunks are created asynchronously, so
+   one run lowered the second region of a script and the next did not
+   (`regions=1` vs `2` with identical code), and under MPI two ranks could take
+   different paths and hang. Decide from program order only (a task that is not
+   launched yet was spawned inside this very region on every rank) and *wait* for
+   what is launched. Spot it by running the same thing repeatedly and comparing the
+   counter, not the numbers; the regression test creates ten arrays and uses them
+   at once.
+
+143. **A path that bypasses the planner must replace everything the planner did
+   quietly.** The tile layer ran the library's own kernels and a first version
+   looked fine until: (a) `potrf_checked!` calls `task_processor()`, which needs the
+   task-local `DTaskTLS` that a light task does not have (give it one, as streams
+   do); (b) the region's tasks never reached the surrounding `wait_all`, so a failing
+   kernel was *swallowed* -- the result was the unchanged input and no error: collect
+   the failures yourself and throw; (c) `Out(info)` needs a copy on every rank
+   (replicated tile) and the restore must also run after a failure; (d) a chunk of
+   another rank is a placeholder without a size, so sizes are exchanged once per
+   region. A test that only compares numbers with the old path passes when the path
+   silently does nothing: assert the counter *and* a failing kernel.
+
+144. **The plan of a bypass is serial work on the slowest core: measure it per task.**
+   The region check cost 346 ms (58 us per task) of a 1.0 s run on Fulda, 20 ms
+   locally, and was 90 % of the gap to the dedicated hook. A profile on the local
+   machine named the cause (a struct and several dictionary lookups built for every
+   one of ~17000 argument uses although there are 529 tiles); looking the same Chunk
+   object up in an `IdDict` and classifying it once halved it (19.8 -> 9.0 ms), and
+   on Fulda the unchanged library Cholesky went from 1.06 to 0.76 s. Put phase timers
+   into every new stage (`HIER_TIMING`) before optimising.
