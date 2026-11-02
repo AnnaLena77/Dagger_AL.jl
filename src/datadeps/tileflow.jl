@@ -181,12 +181,15 @@ Run the recorded region on the TileFlow layer when it qualifies (see the file he
 """
 function tileflow_region!(queue)::Bool
     TILEFLOW_REGIONS[] || return false
+    timing = HIER_TIMING[]
+    t0 = timing ? time_ns() : UInt64(0)
     accel = current_acceleration()
     tr = tile_transport(accel)
     np = tile_nranks(tr)
     np <= 64 || return false
     plan = _region_plan(queue, tr, np)
     plan === nothing && return false
+    t1 = timing ? time_ns() : UInt64(0)
     tiles = plan.tiles; me = tile_rank(tr)
     _exchange_dims!(tr, tiles) || return false
     allmask = np == 64 ? typemax(UInt64) : (UInt64(1) << np) - 1
@@ -194,12 +197,15 @@ function tileflow_region!(queue)::Bool
     sp = TileSpace(length(tiles), id -> tiles[id].owner, id -> tiles[id].dims,
                    id -> (t = tiles[id]; t.kind === :chunk ? tile_chunk_array(t.obj) : t.obj);
                    types = id -> tiles[id].T, initial = mask, homes = mask, transport = tr)
+    t2 = timing ? time_ns() : UInt64(0)
     Threads.atomic_add!(TILEFLOW_REGION_RUNS, 1)
     for c in plan.calls
         c.call.task.stub = TileStub(c.rank)
         tile_spawn!(sp, c.call, [w ? TileRW(id) : TileIn(id) for (id, w) in c.slots]...; at=c.rank)
     end
+    t3 = timing ? time_ns() : UInt64(0)
     err, anyfail = tile_restore!(sp; throw_errors=false)
+    t4 = timing ? time_ns() : UInt64(0)
     # every future gets filled: the value (already done by the kernel on its rank), a marker where the task ran elsewhere, a failure where it did not run
     failure = err === nothing ? ErrorException("a task of the region failed on another rank") : err
     for c in plan.calls
@@ -215,6 +221,11 @@ function tileflow_region!(queue)::Bool
     # The tasks were never enqueued into the surrounding `wait_all`, so nobody else reports their failures: do what it does, in task order
     for c in plan.calls
         fetch(c.call.task; move_value=false, unwrap=false)
+    end
+    if timing
+        t5 = time_ns()
+        ms(a, b) = round((b - a) / 1e6; digits=1)
+        @info "tileflow_region!: $(length(plan.calls)) tasks, $(length(tiles)) tiles: check+plan $(ms(t0, t1)) ms, tile space $(ms(t1, t2)) ms, walk (spawn) $(ms(t2, t3)) ms, run+restore $(ms(t3, t4)) ms, futures $(ms(t4, t5)) ms, total $(ms(t0, t5)) ms"
     end
     return true
 end
