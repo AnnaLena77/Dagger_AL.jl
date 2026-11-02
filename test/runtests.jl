@@ -27,6 +27,7 @@ tests = [
     ("Light Tasks", "microtask.jl"),
     ("TileFlow", "tileflow.jl"),
     ("TileFlow Regions", "datadeps_tileflow.jl"),
+    ("Tile Names", "tilenames.jl"),
     ("Dynamic Loop", "bulk.jl"),
     ("NUMA Map", "numa.jl"),
     ("Processor Grids", "procgrid.jl"),
