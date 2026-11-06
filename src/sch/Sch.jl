@@ -2329,6 +2329,8 @@ function create_proc_state!(ctx, uid::UInt64, to_proc, return_queue)
     return state, start_event
 end
 
+proc_occupancy_idle(istate::ProcessorInternalState) = istate.proc_occupancy[] == 0
+
 function do_tasks(to_proc, return_queue, tasks)
     @dagdebug nothing :processor "Enqueuing task batch" batch_size=length(tasks)
 
@@ -2359,6 +2361,11 @@ function do_tasks(to_proc, return_queue, tasks)
     kick_accels = @reusable_vector :do_tasks_kick_accels Dagger.Acceleration nothing 32
     kick_occupancies = @reusable_vector :do_tasks_kick_occupancies UInt32 UInt32(0) 32
     lock(istate.queue) do queue
+        # An idle target takes the first task of the batch itself. Kicking the other runners for it made an idle
+        # thief steal it from the queue of its (still waking) owner; the owner then sat idle, the next task was
+        # placed behind the stolen one on the thief, and, where the owner may not steal (the driver's thread), nobody
+        # could move it: two workers of a loop ran one after the other (see BUGS.md)
+        own_slot = proc_occupancy_idle(istate) && length(queue) == 0
         for task in tasks
             thunk_id = task.thunk_id
             occupancy = task.est_occupancy
@@ -2390,9 +2397,13 @@ function do_tasks(to_proc, return_queue, tasks)
                 end
             end
             should_launch || continue
-            push!(kick_scopes, task.scope::Dagger.AbstractScope)
-            push!(kick_accels, something((task.options::Options).acceleration, Dagger.DistributedAcceleration()))
-            push!(kick_occupancies, occupancy)
+            if own_slot
+                own_slot = false
+            else
+                push!(kick_scopes, task.scope::Dagger.AbstractScope)
+                push!(kick_accels, something((task.options::Options).acceleration, Dagger.DistributedAcceleration()))
+                push!(kick_occupancies, occupancy)
+            end
             # Read before the hand-over: once queued, another runner may recycle the spec (lesson 93)
             priority = something((task.options::Options).priority, 0)
             push!(queue, task => QueueKey(occupancy, priority))

@@ -962,3 +962,28 @@ end
         @test_skip false
     end
 end
+
+# Two tasks spawned back to back on idle threads run at the same time. Kicking the other runners for the first task made an
+# idle thief steal it from the queue of its (still waking) owner; the second task then waited behind it on the thief, and
+# where the owner may not steal (thread 1) nobody could move it, so the pair ran one after the other in about a third of
+# the bursts (BUGS.md B28).
+@testset "Burst on idle threads" begin
+    if Threads.nthreads() >= 2
+        burst_busy(ms) = (t0 = time_ns(); while time_ns() - t0 < ms * 1_000_000; end; (t0, time_ns()))
+        sc = Dagger.scope(worker=1)
+        function serialized(reps)
+            n = 0
+            for _ in 1:reps
+                ts = [Dagger.with_options(scope=sc) do; Dagger.@spawn burst_busy(10); end for _ in 1:2]
+                (a, b) = fetch.(ts)
+                # one started only after the other ended
+                (a[1] >= b[2] || b[1] >= a[2]) && (n += 1)
+            end
+            return n
+        end
+        serialized(5)  # compile
+        @test serialized(100) <= 5
+    else
+        @test_skip false
+    end
+end

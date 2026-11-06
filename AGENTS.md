@@ -1833,3 +1833,20 @@ lesson.
    nodes is the standard answer on HPC; (d) measure with `Base.cumulative_compile_timing(true)`
    switched on (a counter that was never enabled reads 0.0 everywhere and looks like proof
    that nothing compiles).
+
+150. **A wake-up meant for thieves can steal from an owner who was about to run
+   the task.** `do_tasks` kicks other parked runners "to make them steal". With
+   two tasks spawned back to back on idle threads, the placement was right (task
+   1 on thread 1's processor, task 2 on thread 2's), but the idle thread 2 woke
+   first and stole task 1 from thread 1's queue, whose own runner was still
+   waking. Task 2 then waited behind it on thread 2, and since the driver's
+   thread (thread 1) does not steal, nothing could move it: the pair ran one
+   after the other in 15-50 % of the bursts at 2 threads (stock `master` too,
+   144 of 300), and a self-scheduling loop showed it as "one worker took all
+   indices". It looked like GC, OS scheduling or placement and was none of them:
+   logging the pressure vector at each pick showed the placement correct, and the
+   thread id of each task showed the steal. Do not kick for the first task of a
+   batch when the target is idle with an empty queue (`proc_occupancy_idle`). Find such bugs
+   with timestamps of start and end per task in a burst of equal busy tasks,
+   not with aggregate timings; the test counts bursts whose tasks did not overlap
+   and fails without the fix (`Burst on idle threads`).
