@@ -38,8 +38,8 @@ loop_worker_scopes(::Acceleration, scope, workers::Int) = scope
 # Distributed (and plain shared memory): one worker per thread of the process, named exactly. Left to the scheduler, a loop's workers
 # are placed by load and then stolen: an idle thread takes the first worker from the queue of its (still waking) owner, the second worker
 # waits behind it, and the driver's thread (thread 1) may not steal it, so in a few percent of the loops one thread ran every index (BUGS.md
-# B28; seen as 7.6 s instead of 4.0 s steps in Barnes-Hut at 2 threads). The driver's thread is left out from three threads on, as in
-# uniform Datadeps planning. A scope that is not a set of thread processors of one worker is passed on unchanged.
+# B28; seen as 7.6 s instead of 4.0 s steps in Barnes-Hut at 2 threads). Every thread takes part, the driver's too: leaving it out
+# cost a worker (4 threads: +27 % per step, 8: +10 %, Otus). The loop is asynchronous, so a driver that waits on it runs its worker. A scope that is not a set of thread processors of one worker is passed on unchanged.
 function loop_worker_scopes(accel::DistributedAcceleration, scope::AbstractScope, workers::Int)
     procs = collect(compatible_processors(accel, scope))
     length(procs) >= 2 || return scope
@@ -47,10 +47,6 @@ function loop_worker_scopes(accel::DistributedAcceleration, scope::AbstractScope
     owner = first(procs).owner
     all(p -> p.owner == owner, procs) || return scope
     sort!(procs; by=p -> p.tid)
-    if DATADEPS_AVOID_DRIVER[] && length(procs) >= 3 && owner == 1
-        filtered = filter(p -> p.tid != 1, procs)
-        isempty(filtered) || (procs = filtered)
-    end
     return AbstractScope[ExactScope(p) for p in procs]
 end
 
