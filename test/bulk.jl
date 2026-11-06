@@ -18,6 +18,24 @@
     @testset "failure propagates" begin
         @test_throws Exception Dagger.dynamic_for(i -> i == 7 ? error("boom") : nothing, 100)
     end
+    # The workers of a loop are bound one per thread. Placed by load and then stolen, the second of two workers ran behind the first on
+    # one thread in a third of the loops, so one thread took every index (BUGS.md B28)
+    @testset "workers run concurrently" begin
+        if Threads.nthreads() >= 2
+            sc = Dagger.loop_worker_scopes(Dagger.DistributedAcceleration(), Dagger.scope(worker=1), 2)
+            @test sc isa AbstractVector && all(s -> s isa Dagger.ExactScope, sc)     # one named thread per worker
+            @test length(unique(s.processor.tid for s in sc)) == length(sc) >= 2
+            spin(i) = (t0 = time_ns(); while time_ns() - t0 < 100_000; end; nothing)
+            skewed(reps) = count(1:reps) do _
+                counts = Dagger.dynamic_for(spin, 200; workers=2, chunk=1)
+                maximum(counts) == 200
+            end
+            skewed(5)  # compile
+            @test skewed(100) <= 3
+        else
+            @test_skip false
+        end
+    end
     @testset "per-worker counts" begin
         counts = Dagger.dynamic_for(i -> nothing, 1000; workers=3, chunk=7)
         @test length(counts) == 3 && sum(counts) == 1000

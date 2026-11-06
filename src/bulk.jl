@@ -35,6 +35,24 @@ scope as given (its scheduler balances). MPI: see the method in MPIExt, which pi
 """
 loop_worker_scopes(scope, workers::Int) = loop_worker_scopes(current_acceleration(), scope, workers)
 loop_worker_scopes(::Acceleration, scope, workers::Int) = scope
+# Distributed (and plain shared memory): one worker per thread of the process, named exactly. Left to the scheduler, a loop's workers
+# are placed by load and then stolen: an idle thread takes the first worker from the queue of its (still waking) owner, the second worker
+# waits behind it, and the driver's thread (thread 1) may not steal it, so in a few percent of the loops one thread ran every index (BUGS.md
+# B28; seen as 7.6 s instead of 4.0 s steps in Barnes-Hut at 2 threads). The driver's thread is left out from three threads on, as in
+# uniform Datadeps planning. A scope that is not a set of thread processors of one worker is passed on unchanged.
+function loop_worker_scopes(accel::DistributedAcceleration, scope::AbstractScope, workers::Int)
+    procs = collect(compatible_processors(accel, scope))
+    length(procs) >= 2 || return scope
+    all(p -> p isa ThreadProc, procs) || return scope
+    owner = first(procs).owner
+    all(p -> p.owner == owner, procs) || return scope
+    sort!(procs; by=p -> p.tid)
+    if DATADEPS_AVOID_DRIVER[] && length(procs) >= 3 && owner == 1
+        filtered = filter(p -> p.tid != 1, procs)
+        isempty(filtered) || (procs = filtered)
+    end
+    return AbstractScope[ExactScope(p) for p in procs]
+end
 
 # `scope` is one scope for all workers, or a vector with one scope per worker (cycled): under MPI a scope that covers several
 # threads does not bind a task to any of them (it may run on any free thread of the rank, lesson 120), while a scope that names

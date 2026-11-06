@@ -1834,19 +1834,27 @@ lesson.
    switched on (a counter that was never enabled reads 0.0 everywhere and looks like proof
    that nothing compiles).
 
-150. **A wake-up meant for thieves can steal from an owner who was about to run
-   the task.** `do_tasks` kicks other parked runners "to make them steal". With
-   two tasks spawned back to back on idle threads, the placement was right (task
-   1 on thread 1's processor, task 2 on thread 2's), but the idle thread 2 woke
-   first and stole task 1 from thread 1's queue, whose own runner was still
-   waking. Task 2 then waited behind it on thread 2, and since the driver's
-   thread (thread 1) does not steal, nothing could move it: the pair ran one
-   after the other in 15-50 % of the bursts at 2 threads (stock `master` too,
-   144 of 300), and a self-scheduling loop showed it as "one worker took all
-   indices". It looked like GC, OS scheduling or placement and was none of them:
-   logging the pressure vector at each pick showed the placement correct, and the
-   thread id of each task showed the steal. Do not kick for the first task of a
-   batch when the target is idle with an empty queue (`proc_occupancy_idle`). Find such bugs
-   with timestamps of start and end per task in a burst of equal busy tasks,
-   not with aggregate timings; the test counts bursts whose tasks did not overlap
-   and fails without the fix (`Burst on idle threads`).
+150. **A task placed on an idle thread can be stolen from its owner, and one
+   fix at the kick does not close it.** With two workers spawned back to back
+   the placement was right (worker 1 on thread 1's processor, worker 2 on thread
+   2's), but the idle thread 2 stole worker 1 from thread 1's queue while thread
+   1's runner was still waking; worker 2 then waited behind it on thread 2 and
+   the driver's thread (thread 1) does not steal, so nothing could move it. The
+   pair ran one after the other in 15-50 % of the bursts at 2 threads (stock
+   `master` too, 144 of 300), and a self-scheduling loop showed it as "one worker
+   took all indices". It looked like GC, OS scheduling or placement and was none
+   of them: logging the pressure vector at each pick showed the placement
+   correct, and the thread id of each task showed the steal. The thief arrives by
+   two routes: the kick in `do_tasks` (removed for the first task of a batch onto
+   an idle target, `proc_occupancy_idle`, commit `a2bd6c3`) and the runner that
+   has just completed the workers' input task and scans for work itself, which
+   no kick fix touches: that was the Barnes-Hut case on Otus (a `DTask` argument),
+   still 4 of 96 steps after `a2bd6c3`. A test of the kick fix with the workers
+   started from the driver passed; only starting them from a task and with a
+   `DTask` argument reproduced the app. Test every way a loop can be started.
+   The fix for loops is to bind one worker per thread (`loop_worker_scopes`);
+   the general placement-plus-steal interaction is open (BUGS.md B28). A grace
+   period before a thief takes a lone task did not help, and
+   `JULIA_DAGGER_DRIVER_STEALS=1` fixes it at a Cholesky cost (11-22 % at 64
+   threads). Find such bugs with start/end timestamps per task in a burst of
+   equal busy tasks, not with aggregate timings.
