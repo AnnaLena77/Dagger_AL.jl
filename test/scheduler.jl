@@ -860,3 +860,25 @@ end
         @test length(unique(ids)) > 1
     end
 end
+
+@testset "Candidate ordering" begin
+    order! = Dagger.Sch.order_candidates!
+    for np in (2, 5, 64), all_equal in (true, false)
+        cost = Float64.(rand(1:3, np))
+        # With unequal costs a cheapest candidate must come first and the next few must be ranked;
+        # with equal costs (or among tied minima) every candidate must get a chance to be first.
+        firsts = Set{Int}()
+        for _ in 1:4000
+            P = zeros(Int, np)
+            order!(P, cost, all_equal)
+            @test sort(P) == 1:np
+            if !all_equal
+                @test cost[P[1]] == minimum(cost)
+                np > 5 && @test issorted(cost[P[1:Dagger.Sch.PLACEMENT_SELECT]])
+            end
+            push!(firsts, P[1])
+        end
+        @test length(firsts) == (all_equal ? np : count(==(minimum(cost)), cost))
+    end
+    @inferred order!(zeros(Int, 8), rand(8), false)
+end
